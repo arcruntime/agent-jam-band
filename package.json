@@ -15,7 +15,9 @@
   "dependencies": {
     "dotenv": "^18.0.8",
     "express": "^5.3.0",
+    "force-graph": "^1.52.0",
     "jsonrepair": "^3.15.0",
+    "neo4j-driver": "^6.2.0",
     "openai": "^7.36.0",
     "tone": "^15.1.22",
     "zod": "^4.6.7"

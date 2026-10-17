@@ -19,12 +19,14 @@ import {
   previousMelody,
 } from './fallback.js';
 import { getClient, reasoningParams } from './llm.js';
+import { recall, remember, type BandMemoryItem, type MemoryAgent, type MemoryCtx } from './memory.js';
 import {
   bassReplySchema,
   conductorReplySchema,
   describeIssues,
   drumsReplySchema,
   DURATIONS,
+  type EchoClaim,
   keysReplySchema,
   melodyReplySchema,
 } from './schemas.js';
@@ -42,6 +44,11 @@ const BAND = 'a four-piece AI jam band (drums, bass, keys and melody)';
 const gridParagraph = (m: Meter) =>
   `Grid: ${m.description} The song's bpm counts quarter notes per minute. Each turn you write the NEXT 4 BARS, continuing naturally from the previous bars you are shown. Match the vibe, bpm, key and meter given in the song object.`;
 
+const ECHO_SHAPE = '"echoes": <null, or {"id": "<a motif id copied from band_memory>", "reason": "<at most 12 words>"}>';
+
+const MEMORY_PARAGRAPH =
+  'Band memory: the request includes "band_memory", up to 3 recent phrases ("motifs") that the OTHER players wrote in earlier blocks, each with an id, the player, the block number and a summary of what was played (steps and notes). It may be empty. When one of them would make a good musical callback, bring it back or answer it in your own part: repeat or vary the groove, quote the hook, echo the chords, and then set "echoes" to that motif\'s id with a short reason. Do not force it: if nothing fits, set "echoes" to null. Only ever use an id that appears in band_memory.';
+
 const JSON_ONLY = 'Reply with ONLY a JSON object, with no prose, no comments and no markdown fences, in exactly this shape:';
 
 const drumsSystem = (m: Meter) =>
@@ -49,7 +56,8 @@ const drumsSystem = (m: Meter) =>
     `You are the DRUMMER in ${BAND}. You write one drum part at a time, as JSON, on a sixteenth-note step grid.`,
     `${gridParagraph(m)} Develop the groove and vary it a little from phrase to phrase; a small fill in bar 4 is welcome. Let the kick and snare follow the meter's grouping rather than forcing a 4/4 backbeat onto it.`,
     `The bassist locks to your kick, and the keys and melody players read your bars too, so make the kick pattern deliberate and keep at least one kick in every bar.`,
-    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you played and why>", "bars": [{"kick": [${m.stepsPerBar} values], "snare": [${m.stepsPerBar} values], "hat": [${m.stepsPerBar} values]}, {...}, {...}, {...}]}`,
+    MEMORY_PARAGRAPH,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you played and why>", ${ECHO_SHAPE}, "bars": [{"kick": [${m.stepsPerBar} values], "snare": [${m.stepsPerBar} values], "hat": [${m.stepsPerBar} values]}, {...}, {...}, {...}]}`,
     `Rules: "bars" has exactly 4 objects. Each of kick, snare and hat is an array of exactly ${m.stepsPerBar} integers, each 0 (silent) or 1 (hit), with at most 16 hits per bar across kick, snare and hat combined. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
@@ -58,7 +66,8 @@ const bassSystem = (m: Meter) =>
     `You are the BASSIST in ${BAND}. You write one bass part at a time, as JSON, on a sixteenth-note step grid.`,
     gridParagraph(m),
     `You are given the drummer's NEXT 4 BARS. Read them first and lock to the kick: in every bar that has a kick, you MUST play a note on the step of the first kick hit, and most of your other notes should land on kick steps or answer the gaps between kicks as syncopated pickups. Leave space where the drums are busy.`,
-    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how you locked to the drums and why>", "bars": [[{"step": 0, "note": "A2", "dur": "8n"}, ...], [...], [...], [...]]}`,
+    MEMORY_PARAGRAPH,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how you locked to the drums and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "note": "A2", "dur": "8n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar, each with at least one note. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic, one note per step). note is scientific pitch notation such as "A1", "C#2" or "Eb2", in the range E1 to E3. Stay in the key (mostly root, fifth and octave, with the occasional passing tone). dur is one of ${DUR_LIST} ("1m" holds for a whole bar) and should not run past the end of the bar. Use at most 16 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
@@ -67,7 +76,8 @@ const keysSystem = (m: Meter) =>
     `You are the KEYS player in ${BAND}. You write one chord part at a time, as JSON, on a sixteenth-note step grid.`,
     gridParagraph(m),
     `You are given the drummer's and the bassist's NEXT 4 BARS. Read both first. Build your chords on the bass: the chord sounding at each step should include the note the bassist is playing there (or its most recent note), or be a sensible chord over it, so keys and bass never clash. Comp against the drums: place chord hits on kick or snare steps or on the meter's group starts, and leave space; long sustained chords are fine ("1m" holds a whole bar). Keep voicings above the bass, mostly between octave 3 and octave 5.`,
-    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what chords you chose and why>", "bars": [[{"step": 0, "notes": ["A3", "C4", "E4"], "dur": "2n"}, ...], [...], [...], [...]]}`,
+    MEMORY_PARAGRAPH,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what chords you chose and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "notes": ["A3", "C4", "E4"], "dur": "2n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar, each with 1 to 6 chord hits. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending. notes is 2 to 5 distinct pitches in scientific pitch notation such as "A3", "C#4" or "Eb4", all in octaves 2 to 5. dur is one of ${DUR_LIST}. Use at most 6 chord hits per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
@@ -76,7 +86,8 @@ const melodySystem = (m: Meter) =>
     `You are the MELODY player in ${BAND}. You write one lead line at a time, as JSON, on a sixteenth-note step grid.`,
     gridParagraph(m),
     `You are given the drummer's, the bassist's and the keys player's NEXT 4 BARS. Read all three first. Write a singable lead line in the key: put chord tones from the keys part on the downbeat and on the meter's group starts, use passing tones between them, repeat a short motif and vary it, and leave rests (an empty array is a rest bar) so the part breathes. Play single notes only.`,
-    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how the melody fits the chords and why>", "bars": [[{"step": 0, "note": "E5", "dur": "4n"}, ...], [...], [...], [...]]}`,
+    MEMORY_PARAGRAPH,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how the melody fits the chords and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "note": "E5", "dur": "4n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar; a bar may be empty but there must be at least 3 notes across the 4 bars. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic). note is scientific pitch notation such as "E5" or "F#4", in octaves 4 to 6 (C4 to C6). dur is one of ${DUR_LIST}. Use at most 12 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
@@ -186,22 +197,29 @@ interface Fallback<B> {
   source: string;
 }
 
+type Ctx = MemoryCtx | undefined;
+
 /**
  * Runs an agent; if both attempts fail, returns a normal-looking reply that reuses the agent's previous block (or a built-in pattern) instead.
  * The failure goes to the server console only. The reply has no "why", so the UI shows nothing for it.
+ * Either way the phrase is written to the band's memory (Neo4j), without waiting for the write and without ever failing the reply.
  */
 async function guarded<B>(
-  name: string,
-  run: () => Promise<AgentResult<{ why: string; bars: B[] }>>,
+  name: MemoryAgent,
+  ctx: Ctx,
+  run: () => Promise<AgentResult<{ why: string; bars: B[]; echoes?: EchoClaim | null }>>,
   fallback: () => Fallback<B>,
 ): Promise<AgentReply<B>> {
   const started = Date.now();
   try {
     const { data, latencyMs } = await run();
-    return { ...data, latencyMs };
+    const { echoes = null, ...reply } = data;
+    if (ctx) remember(ctx, name, { bars: reply.bars, why: reply.why, echoes, fallback: false });
+    return { ...reply, latencyMs, ...(echoes ? { echoed: true } : {}) };
   } catch (err) {
     const { bars, source } = fallback();
     console.error(`[${name}] FALLBACK (${source}) because: ${(err as Error).message}`);
+    if (ctx) remember(ctx, name, { bars, why: '', echoes: null, fallback: true });
     return { why: '', bars, latencyMs: Date.now() - started, fallback: true };
   }
 }
@@ -259,15 +277,19 @@ export async function conductorAgent(vibe: string, overrides: ConductorOverrides
   }
 }
 
-export function drumsAgent(state: JamState): Promise<AgentReply<DrumBar>> {
+const recallFor = (ctx: Ctx, agent: MemoryAgent): Promise<BandMemoryItem[]> => (ctx ? recall(ctx, agent) : Promise.resolve([]));
+
+export async function drumsAgent(state: JamState, ctx?: Ctx): Promise<AgentReply<DrumBar>> {
   const m = meterOf(state.timeSignature);
   const user = JSON.stringify({
     song: song(state, m),
     previous_drum_bars: history(state, 'drums'),
+    band_memory: await recallFor(ctx, 'drums'),
     task: 'Write the next 4 bars of drums.',
   });
   return guarded<DrumBar>(
     'drums',
+    ctx,
     () => runAgent('drums', drumsSystem(m), user, drumsReplySchema(m.stepsPerBar)),
     () => {
       const previous = previousDrums(state);
@@ -276,16 +298,18 @@ export function drumsAgent(state: JamState): Promise<AgentReply<DrumBar>> {
   );
 }
 
-export function bassAgent(state: JamState, drums: DrumBar[]): Promise<AgentReply<BassBar>> {
+export async function bassAgent(state: JamState, drums: DrumBar[], ctx?: Ctx): Promise<AgentReply<BassBar>> {
   const m = meterOf(state.timeSignature);
   const user = JSON.stringify({
     song: song(state, m),
     drums_next_4_bars: drumsView(drums),
     previous_bass_bars: history(state, 'bass'),
+    band_memory: await recallFor(ctx, 'bass'),
     task: 'Write the next 4 bars of bass, locked to the kick of drums_next_4_bars.',
   });
   return guarded<BassBar>(
     'bass',
+    ctx,
     () => runAgent('bass', bassSystem(m), user, bassReplySchema(m.stepsPerBar, drums)),
     () => {
       const previous = previousBass(state);
@@ -296,17 +320,19 @@ export function bassAgent(state: JamState, drums: DrumBar[]): Promise<AgentReply
   );
 }
 
-export function keysAgent(state: JamState, drums: DrumBar[], bass: BassBar[]): Promise<AgentReply<ChordBar>> {
+export async function keysAgent(state: JamState, drums: DrumBar[], bass: BassBar[], ctx?: Ctx): Promise<AgentReply<ChordBar>> {
   const m = meterOf(state.timeSignature);
   const user = JSON.stringify({
     song: song(state, m),
     drums_next_4_bars: drumsView(drums),
     bass_next_4_bars: bass,
     previous_keys_bars: history(state, 'keys'),
+    band_memory: await recallFor(ctx, 'keys'),
     task: 'Write the next 4 bars of chords over the bass and drums above.',
   });
   return guarded<ChordBar>(
     'keys',
+    ctx,
     () => runAgent('keys', keysSystem(m), user, keysReplySchema(m.stepsPerBar)),
     () => {
       const previous = previousKeys(state);
@@ -315,7 +341,7 @@ export function keysAgent(state: JamState, drums: DrumBar[], bass: BassBar[]): P
   );
 }
 
-export function melodyAgent(state: JamState, drums: DrumBar[], bass: BassBar[], keys: ChordBar[]): Promise<AgentReply<MelodyBar>> {
+export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassBar[], keys: ChordBar[], ctx?: Ctx): Promise<AgentReply<MelodyBar>> {
   const m = meterOf(state.timeSignature);
   const user = JSON.stringify({
     song: song(state, m),
@@ -323,10 +349,12 @@ export function melodyAgent(state: JamState, drums: DrumBar[], bass: BassBar[], 
     bass_next_4_bars: bass,
     keys_next_4_bars: keys,
     previous_melody_bars: history(state, 'melody'),
+    band_memory: await recallFor(ctx, 'melody'),
     task: 'Write the next 4 bars of melody over the chords, bass and drums above.',
   });
   return guarded<MelodyBar>(
     'melody',
+    ctx,
     () => runAgent('melody', melodySystem(m), user, melodyReplySchema(m.stepsPerBar)),
     () => {
       const previous = previousMelody(state);

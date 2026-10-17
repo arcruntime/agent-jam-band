@@ -15,6 +15,22 @@ const why = z
   .trim()
   .min(1)
   .transform((s) => s.split(/\s+/).slice(0, MAX_WHY_WORDS).join(' ').slice(0, 200));
+/**
+ * "echoes": null, or { id, reason } naming a motif from band memory that this phrase calls back. Lenient on purpose (a bare id string, a different key, a missing or odd value all work): a callback is a bonus and never costs a retry.
+ */
+export interface EchoClaim {
+  id: string;
+  reason: string;
+}
+export function parseEcho(value: unknown): EchoClaim | null {
+  const raw = typeof value === 'string' ? { id: value } : value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+  if (!raw) return null;
+  const id = raw.id ?? raw.motif ?? raw.motifId ?? raw.motif_id;
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_:-]{3,140}$/.test(id.trim())) return null;
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim().split(/\s+/).slice(0, 12).join(' ').slice(0, 120) : '';
+  return { id: id.trim(), reason: reason || 'calling it back' };
+}
+const echoes = z.unknown().optional().transform(parseEcho);
 const dur = z.enum(DURATIONS);
 const pitch = z.string().regex(/^[A-G][#b]?[0-8]$/, 'pitch must look like "A2" or "C#3"');
 const octave = (p: string) => Number(p.slice(-1));
@@ -102,11 +118,11 @@ export const conductorReplySchema = z.object({
   why,
 });
 
-export const drumsReplySchema = (steps: number) => z.object({ why, bars: z.array(drumBarSchema(steps)).length(BARS) });
+export const drumsReplySchema = (steps: number) => z.object({ why, echoes, bars: z.array(drumBarSchema(steps)).length(BARS) });
 
 /** Bass reply schema, aware of the drums it must lock to: a note has to land on each bar's first kick. */
 export function bassReplySchema(steps: number, drums: z.infer<ReturnType<typeof drumBarSchema>>[]) {
-  return z.object({ why, bars: z.array(bassBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
+  return z.object({ why, echoes, bars: z.array(bassBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
     reply.bars.forEach((bar, b) => {
       const firstKick = drums[b]?.kick.indexOf(1) ?? -1;
       if (firstKick >= 0 && !bar.some((n) => n.step === firstKick)) {
@@ -120,10 +136,10 @@ export function bassReplySchema(steps: number, drums: z.infer<ReturnType<typeof 
   });
 }
 
-export const keysReplySchema = (steps: number) => z.object({ why, bars: z.array(keysBarSchema(steps)).length(BARS) });
+export const keysReplySchema = (steps: number) => z.object({ why, echoes, bars: z.array(keysBarSchema(steps)).length(BARS) });
 
 export const melodyReplySchema = (steps: number) =>
-  z.object({ why, bars: z.array(melodyBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
+  z.object({ why, echoes, bars: z.array(melodyBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
     const total = reply.bars.reduce((sum, bar) => sum + bar.length, 0);
     if (total < 3) ctx.addIssue({ code: 'custom', message: 'the melody needs at least 3 notes across the 4 bars', path: ['bars'] });
   });
@@ -132,6 +148,8 @@ export const melodyReplySchema = (steps: number) =>
 
 export const conductorRequestSchema = z.object({
   vibe: z.string().trim().min(1).max(300),
+  /** Browser-made id of this run; keys the band's memory in Neo4j */
+  sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
   overrides: z
     .object({
       bpm: z.number().int().min(60).max(180).optional(),

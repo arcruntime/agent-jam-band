@@ -61,6 +61,8 @@ export interface AgentReply<T> {
   latencyMs: number;
   /** True when the agent failed twice and the server reused an earlier block instead (the UI treats this like any other reply) */
   fallback?: boolean;
+  /** True when this agent called back an earlier motif, so the graph has a new ECHOES edge to fetch */
+  echoed?: boolean;
 }
 
 /** Four bars of every part, as played together. */
@@ -85,4 +87,36 @@ export interface ConductorReply {
   why: string;
   latencyMs: number;
   fallback?: boolean;
+}
+
+// ---------- Band memory (Neo4j) ----------
+
+export type GraphNodeType = 'session' | 'block' | 'agent' | 'motif';
+
+export interface GraphNode {
+  id: string;
+  type: GraphNodeType;
+  label: string;
+  /** drums | bass | keys | melody, for agent and motif nodes */
+  agent?: string;
+  /** Block number (1-based), for block and motif nodes */
+  block?: number;
+  summary?: string;
+}
+
+export type GraphLinkType = 'IN_SESSION' | 'IN_BLOCK' | 'PLAYED' | 'ECHOES' | 'LOCKS_TO';
+
+export interface GraphLink {
+  source: string;
+  target: string;
+  type: GraphLinkType;
+  /** Why the motif was brought back, for ECHOES links */
+  reason?: string;
+}
+
+export interface GraphPayload {
+  nodes: GraphNode[];
+  links: GraphLink[];
+  /** False when Neo4j is off or unreachable (the lists are then empty) */
+  available: boolean;
 }

@@ -20,7 +20,7 @@ body {
   font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
-main { max-width: 960px; margin: 0 auto; padding: 32px 16px; }
+main { max-width: 1280px; margin: 0 auto; padding: 32px 16px; }
 h1 { margin: 0 0 4px; font-size: 22px; }
 h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .sub { margin: 0 0 24px; color: var(--muted); }
@@ -116,3 +116,19 @@ input[aria-invalid='true'] { border-color: var(--bad); }
 .msg.conductor .who { color: var(--conductor); }
 .msg.keys .who { color: var(--keys); }
 .msg.melody .who { color: var(--melody); }
+
+/* ---- workspace: player and chat on the left, band-memory graph on the right ---- */
+.workspace { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.col-main { display: grid; gap: 16px; min-width: 0; }
+@media (min-width: 980px) {
+  .workspace { grid-template-columns: minmax(0, 1fr) minmax(360px, 460px); }
+  .graph { position: sticky; top: 16px; }
+}
+.legend { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.legend i.echo { background: transparent; border: 2px solid #fff; }
+.graph-host { position: relative; height: 520px; border-radius: 8px; background: var(--bg); overflow: hidden; }
+.graph-empty { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); font-size: 13px; pointer-events: none; }
+.graph-empty[hidden] { display: none; }
+.msg.drums .bars, .msg.bass .bars, .msg.keys .bars, .msg.melody .bars { white-space: nowrap; }

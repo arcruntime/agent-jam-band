@@ -8,11 +8,13 @@ import type {
   ConductorOverrides,
   ConductorReply,
   DrumBar,
+  GraphPayload,
   JamState,
   MelodyBar,
 } from '../shared/types';
 import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
 import { getRig } from './audio';
+import { createGraphPanel, type EchoEvent } from './graph';
 import { Pipeline, type Block } from './pipeline';
 import { stepEvents } from './steps';
 
@@ -33,6 +35,8 @@ type Mode = 'idle' | 'loading' | 'playing';
 
 /** Everything that belongs to one Start..Stop run. Replaced on every Start so stale async work can detect it was cancelled. */
 interface Session {
+  /** Keys this run's motifs in the band memory (Neo4j) */
+  id: string;
   state: JamState;
   /** Sixteenth-note steps per bar, set from the conductor's time signature */
   stepsPerBar: number;
@@ -74,21 +78,34 @@ app.innerHTML = `
         <button id="stop" class="ghost" disabled>Stop</button>
       </div>
     </section>
-    <div class="layout">
-      <section class="panel player">
-        <dl class="meta">
-          <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
-          <div><dt>Key</dt><dd id="metaKey">–</dd></div>
-          <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
-          <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
-        </dl>
-        <p id="now" class="now">Press Start to hear the band.</p>
-        <p id="next" class="next"></p>
-      </section>
-      <section class="panel chat">
-        <h2>Band chat</h2>
-        <ol id="log" aria-live="polite"></ol>
-      </section>
+    <div class="workspace">
+      <div class="col-main">
+        <section class="panel player">
+          <dl class="meta">
+            <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
+            <div><dt>Key</dt><dd id="metaKey">–</dd></div>
+            <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
+            <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
+          </dl>
+          <p id="now" class="now">Press Start to hear the band.</p>
+          <p id="next" class="next"></p>
+        </section>
+        <section class="panel chat">
+          <h2>Band chat</h2>
+          <ol id="log" aria-live="polite"></ol>
+        </section>
+      </div>
+      <aside class="panel graph">
+        <h2>Band memory</h2>
+        <ul class="legend">
+          <li><i style="background: var(--drums)"></i>Drums</li>
+          <li><i style="background: var(--bass)"></i>Bass</li>
+          <li><i style="background: var(--keys)"></i>Keys</li>
+          <li><i style="background: var(--melody)"></i>Melody</li>
+          <li><i class="echo"></i>Echo</li>
+        </ul>
+        <div id="graphHost" class="graph-host"></div>
+      </aside>
     </div>
   </main>
 `;
@@ -105,6 +122,14 @@ const metaBpmEl = document.querySelector<HTMLElement>('#metaBpm')!;
 const metaKeyEl = document.querySelector<HTMLElement>('#metaKey')!;
 const metaMeterEl = document.querySelector<HTMLElement>('#metaMeter')!;
 const metaSoundEl = document.querySelector<HTMLElement>('#metaSound')!;
+
+const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphHost')!, {
+  drums: cssVar('--drums'),
+  bass: cssVar('--bass'),
+  keys: cssVar('--keys'),
+  melody: cssVar('--melody'),
+});
 
 const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System' };
 
@@ -202,11 +227,51 @@ const barIndex = (n: number, i: number) => (n - 1) * BARS_PER_CHUNK + i;
 /** One musician's turn: send the shared state plus the earlier parts, log its note, and record its bars in the shared state. */
 async function runStage<T>(s: Session, who: PartName, n: number, earlier: object, record: (bars: T[]) => void): Promise<T[]> {
   const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
-  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier });
+  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier, memory: { sessionId: s.id, block: n } });
   if (session !== s) throw new Error('stopped');
   if (reply.why) log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
   record(reply.bars);
+  if (reply.echoed) void refreshGraph(s); // a new ECHOES edge is on its way into the graph
   return reply.bars;
+}
+
+// ---------- Band memory graph ----------
+
+const ECHO_NOUN: Record<string, string> = { drums: 'groove', bass: 'bassline', keys: 'chords', melody: 'hook' };
+
+/** Chat line for a new ECHOES edge, e.g. "bringing back the melody's hook from block 2". */
+function announceEcho(e: EchoEvent) {
+  const who = e.from.agent as PartName | undefined;
+  if (!who || !(who in LABEL) || e.to.block === undefined) return;
+  const target = e.to.agent === who ? 'its own' : `the ${e.to.agent}'s`;
+  const reason = e.reason && e.reason !== 'calling it back' ? ` (${e.reason})` : '';
+  log(who, `bringing back ${target} ${ECHO_NOUN[e.to.agent ?? ''] ?? 'phrase'} from block ${e.to.block}${reason}`, `echo · block ${e.from.block ?? ''}`);
+}
+
+let graphBusy = false;
+let graphDirty = false;
+
+/** Fetches the session graph and hands it to the panel. Runs on every finished block (and when an agent reports a callback). Failures stay in the console. */
+async function refreshGraph(s: Session) {
+  if (graphBusy) {
+    graphDirty = true;
+    return;
+  }
+  graphBusy = true;
+  try {
+    do {
+      graphDirty = false;
+      const res = await fetch(`/api/graph?session=${encodeURIComponent(s.id)}`);
+      if (!res.ok) break;
+      const payload = (await res.json()) as GraphPayload;
+      if (session !== s) break;
+      for (const e of graphPanel.update(payload)) announceEcho(e);
+    } while (graphDirty);
+  } catch (err) {
+    console.warn(`[client] could not refresh the band memory graph: ${errMsg(err)}`);
+  } finally {
+    graphBusy = false;
+  }
 }
 
 // ---------- Transport ----------
@@ -214,8 +279,14 @@ async function runStage<T>(s: Session, who: PartName, n: number, earlier: object
 const transport = Tone.getTransport();
 let session: Session | null = null;
 
+/** A fresh id for each Start..Stop run (letters, digits, dashes). */
+function makeId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function newSession(vibe: string): Session {
   const s: Session = {
+    id: makeId(),
     // tempo, key and time signature are replaced by the conductor's answer before the pipeline starts
     state: { tempo: 90, key: 'A minor', timeSignature: '4/4', vibe, bars: [] },
     stepsPerBar: 16,
@@ -258,7 +329,10 @@ function newSession(vibe: string): Session {
         },
       ],
 
-      onBlockReady: () => s.waitFirst?.resolve(),
+      onBlockReady: () => {
+        s.waitFirst?.resolve();
+        void refreshGraph(s);
+      },
 
       // Errors never reach the band chat: the console has them, the music keeps going.
       onError: (stage, n, err, willRetry) => {
@@ -315,6 +389,7 @@ async function start() {
   session = s;
   setMode('loading');
   logEl.replaceChildren();
+  graphPanel.clear();
   metaBpmEl.textContent = metaKeyEl.textContent = metaMeterEl.textContent = metaSoundEl.textContent = '–';
   log('system', `Vibe: "${vibe}".`);
 
@@ -323,7 +398,7 @@ async function start() {
 
     // 1. The conductor runs first on every new vibe.
     nowEl.textContent = 'The conductor is choosing tempo, key and meter…';
-    const c = await post<ConductorReply>('/api/agents/conductor', { vibe, overrides });
+    const c = await post<ConductorReply>('/api/agents/conductor', { vibe, overrides, sessionId: s.id });
     if (session !== s) return;
     s.state.tempo = c.bpm;
     s.state.key = c.key;

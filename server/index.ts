@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { meterOf } from '../shared/meter.js';
 import { AgentError, bassAgent, conductorAgent, drumsAgent, keysAgent, melodyAgent } from './agents.js';
 import { config } from './config.js';
+import { closeNeo4j, initNeo4j, onNeo4jConnected } from './graph.js';
 import { getClient } from './llm.js';
+import { ensureSchema, loadGraph, memoryCtxSchema, rememberSession, sessionIdSchema } from './memory.js';
 import { BARS, bassBarSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema } from './schemas.js';
 
 const app = express();
@@ -58,22 +60,27 @@ const stepsFor = (state: z.infer<typeof jamStateSchema>) => meterOf(state.timeSi
 
 // Conductor: runs first on each new vibe. Returns { bpm, key, timeSignature, why, latencyMs }.
 route('/api/agents/conductor', async (b) => {
-  const { vibe, overrides } = conductorRequestSchema.parse(b);
-  return conductorAgent(vibe, overrides);
+  const { vibe, overrides, sessionId } = conductorRequestSchema.parse(b);
+  const reply = await conductorAgent(vibe, overrides);
+  if (sessionId) rememberSession(sessionId, { vibe, bpm: reply.bpm, key: reply.key, timeSignature: reply.timeSignature, preset: reply.preset });
+  return reply;
 });
 
+// Where this request belongs in the band's memory. A missing or malformed value just means no memory for this call.
+const memoryOf = (b: Record<string, unknown>) => memoryCtxSchema.safeParse(b.memory).data;
+
 // Musicians, in order. Each gets the shared state plus every earlier part for the same 4 bars.
-route('/api/agents/drums', async (b) => drumsAgent(jamStateSchema.parse(b.state)));
+route('/api/agents/drums', async (b) => drumsAgent(jamStateSchema.parse(b.state), memoryOf(b)));
 
 route('/api/agents/bass', async (b) => {
   const state = jamStateSchema.parse(b.state);
-  return bassAgent(state, four(drumBarSchema(stepsFor(state))).parse(b.drums));
+  return bassAgent(state, four(drumBarSchema(stepsFor(state))).parse(b.drums), memoryOf(b));
 });
 
 route('/api/agents/keys', async (b) => {
   const state = jamStateSchema.parse(b.state);
   const steps = stepsFor(state);
-  return keysAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(bassBarSchema(steps)).parse(b.bass));
+  return keysAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(bassBarSchema(steps)).parse(b.bass), memoryOf(b));
 });
 
 route('/api/agents/melody', async (b) => {
@@ -84,8 +91,18 @@ route('/api/agents/melody', async (b) => {
     four(drumBarSchema(steps)).parse(b.drums),
     four(bassBarSchema(steps)).parse(b.bass),
     four(keysBarSchema(steps)).parse(b.keys),
+    memoryOf(b),
   );
 });
+
+// The band's memory graph for one session, for the force-graph panel. Always 200: if Neo4j is off the lists are empty and available is false.
+app.get('/api/graph', async (req, res) => {
+  const id = sessionIdSchema.safeParse(req.query.session);
+  if (!id.success) return void res.status(400).json({ error: 'session query parameter is required' });
+  res.json(await loadGraph(id.data));
+});
+
+onNeo4jConnected(ensureSchema);
 
 app.listen(config.port, () => {
   console.log(`API listening on http://localhost:${config.port}`);
@@ -93,4 +110,9 @@ app.listen(config.port, () => {
   for (const name of ['AIAND_BASE_URL', 'AIAND_API_KEY', 'AIAND_MODEL']) {
     if (!process.env[name]?.trim()) console.error(`WARNING: ${name} is empty in .env, so every agent call will fail and the band will fall back to canned patterns.`);
   }
+  void initNeo4j(); // logs "neo4j connected", or one console line if it cannot connect; the server runs either way
 });
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => void closeNeo4j().finally(() => process.exit(0)));
+}

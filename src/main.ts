@@ -135,6 +135,8 @@ app.innerHTML = `
         <div class="actions">
           <button id="start">Start</button>
           <button id="stop" class="ghost" disabled>Stop</button>
+          <button id="rec" class="ghost rec" disabled aria-pressed="false" title="Record the band's output; click again to save a file">● Rec</button>
+          <span id="recTimer" class="rec-timer" hidden></span>
         </div>
       </div>
       <div class="statusrow">
@@ -225,6 +227,8 @@ const meterEl = document.querySelector<HTMLSelectElement>('#meter')!;
 const startBtn = document.querySelector<HTMLButtonElement>('#start')!;
 const stopBtn = document.querySelector<HTMLButtonElement>('#stop')!;
 const nowEl = document.querySelector<HTMLParagraphElement>('#now')!;
+const recBtn = document.querySelector<HTMLButtonElement>('#rec')!;
+const recTimer = document.querySelector<HTMLElement>('#recTimer')!;
 const nextEl = document.querySelector<HTMLParagraphElement>('#next')!;
 const logEl = document.querySelector<HTMLOListElement>('#log')!;
 const metaBpmEl = document.querySelector<HTMLElement>('#metaBpm')!;
@@ -312,6 +316,7 @@ function setMode(mode: Mode) {
   bpmEl.disabled = mode !== 'idle';
   meterEl.disabled = mode !== 'idle';
   stopBtn.disabled = mode === 'idle';
+  recBtn.disabled = mode !== 'playing';
   steerPanel.hidden = mode !== 'playing';
   if (mode !== 'playing') {
     steerText.value = '';
@@ -402,11 +407,71 @@ function showSettings(c: ConductorSettings) {
   metaSoundEl.textContent = c.preset;
 }
 
+// ---------- Recording ----------
+
+/** The song bar (counted from 1 through the whole session) that is sounding, as of the last status update. */
+let lastBar = 1;
+let rec: { startedAt: number; startBar: number; sessionId: string; vibe: string; timer: number } | null = null;
+
+const fmtClock = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+
+function showRecording(on: boolean) {
+  recBtn.classList.toggle('on', on);
+  recBtn.setAttribute('aria-pressed', String(on));
+  recBtn.textContent = on ? '■ Rec' : '● Rec';
+  recTimer.hidden = !on;
+  if (!on) recTimer.textContent = '';
+}
+
+async function startRec() {
+  if (rec || !session) return;
+  const s = session;
+  const started = await getRig().startRecording();
+  if (!started) return; // no error text in the UI; the console has it
+  const startedAt = performance.now();
+  rec = { startedAt, startBar: lastBar, sessionId: s.id, vibe: vibeEl.value, timer: 0 };
+  const tick = () => (recTimer.textContent = `recording ${fmtClock((performance.now() - startedAt) / 1000)}`);
+  tick();
+  rec.timer = window.setInterval(tick, 250);
+  showRecording(true);
+}
+
+/** Ends the take, downloads it and stores its summary in Neo4j. Safe to call when nothing is recording. */
+async function stopRec() {
+  const r = rec;
+  if (!r) return;
+  rec = null;
+  window.clearInterval(r.timer);
+  showRecording(false);
+  const endBar = Math.max(r.startBar, lastBar);
+  const durationSec = (performance.now() - r.startedAt) / 1000;
+  const blob = await getRig().stopRecording();
+  if (blob && blob.size > 0) {
+    const ext = /mp4/.test(blob.type) ? 'mp4' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+    const slug = r.vibe.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'jam';
+    const d = new Date();
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `agent-jam-band-${slug}-${stamp}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+  // Only a summary goes to the band's memory; a failure there is for the console, never the UI.
+  post('/api/recording', { sessionId: r.sessionId, id: Date.now().toString(36), startBar: r.startBar, endBar, durationSec: Math.round(durationSec) }).catch((e) => console.warn(`[client] recording summary was not saved (${errMsg(e)})`));
+}
+
+recBtn.addEventListener('click', () => void (rec ? stopRec() : startRec()));
+
 const barsOf = (n: number) => `${(n - 1) * BARS_PER_CHUNK + 1}–${n * BARS_PER_CHUNK}`;
 
 function renderStatus(s: Session) {
   renderSection(s);
   if (s.current) {
+    lastBar = (s.current.n - 1) * BARS_PER_CHUNK + s.bar + 1;
     nowEl.textContent = `Playing bars ${barsOf(s.current.n)} (bar ${s.bar + 1} of ${BARS_PER_CHUNK})`;
   }
   const st = s.pipeline.status();
@@ -622,6 +687,8 @@ function newSession(vibe: string): Session {
           write: (n, up) =>
             runStage<VoxBar>(s, 'vox', n, { drums: up.drums, keys: up.keys, melody: up.melody }, (bars) => {
               bars.forEach((vox, i) => (barOf(s, n, i).vox = vox));
+              // Console only: a quiet vox can be traced from here (what section, how many chops, and how many have been triggered so far).
+              console.info(`[vox] block ${n} (${s.plans.get(n)?.slot.section ?? '?'}) bars ${barsOf(n)}: hits/bar ${JSON.stringify(bars.map((b) => b.length))}, Studio vox ${getRig().getStudio().vox ? 'on' : 'off'}, triggered so far ${getRig().voxStats().triggered}`);
             }),
         },
       ],
@@ -884,6 +951,7 @@ async function start() {
 
 function stop() {
   if (!session) return;
+  void stopRec(); // the take ends with the band (its tail is already in the recorder)
   const s = session;
   session = null;
   s.pipeline.stop();

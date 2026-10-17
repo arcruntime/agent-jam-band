@@ -6,7 +6,7 @@ import { AgentError, bassAgent, conductorAgent, conductorSteerAgent, drumsAgent,
 import { config } from './config.js';
 import { closeNeo4j, initNeo4j, onNeo4jConnected } from './graph.js';
 import { getClient } from './llm.js';
-import { discardBlocks, ensureSchema, loadGraph, memoryCtxSchema, rememberSession, rememberSteer, sessionIdSchema } from './memory.js';
+import { discardBlocks, ensureSchema, loadGraph, memoryCtxSchema, rememberRecording, rememberSession, rememberSteer, sessionIdSchema } from './memory.js';
 import { BARS, bassBarSchema, blockPlanSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema, melodyBarSchema } from './schemas.js';
 
 const app = express();
@@ -79,6 +79,22 @@ route('/api/agents/conductor', async (b) => {
 route('/api/memory/discard', async (b) => {
   const { sessionId, blocks } = z.object({ sessionId: sessionIdSchema, blocks: z.array(z.number().int().min(1).max(100000)).max(64) }).parse(b);
   discardBlocks(sessionId, blocks);
+  return { ok: true };
+});
+
+// A finished recording: only a summary is kept (bars and length). The file itself never leaves the listener's computer.
+route('/api/recording', async (b) => {
+  const r = z
+    .object({
+      sessionId: sessionIdSchema,
+      id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/),
+      startBar: z.number().int().min(1).max(1_000_000),
+      endBar: z.number().int().min(1).max(1_000_000),
+      durationSec: z.number().min(0).max(86_400),
+    })
+    .refine((v) => v.endBar >= v.startBar, { message: 'endBar must not come before startBar' })
+    .parse(b);
+  rememberRecording(r.sessionId, { id: r.id, startBar: r.startBar, endBar: r.endBar, durationSec: Math.round(r.durationSec) });
   return { ok: true };
 });
 

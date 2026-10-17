@@ -89,20 +89,44 @@ export const previousVox = (state: JamState): VoxBar[] | null =>
 export const silentVox = (): VoxBar[] => [[], [], [], []];
 
 /**
- * The vox is a garnish, so whatever the model wrote is held to the song section's limits (this runs on every reply, fallback included): silent in the intro, a few quiet chops in the breakdown, up to 6 rising chops per bar in a build and up to 8 in a drop, and never louder than 0.7, which is below the melody's own default of 0.8.
+ * The vox is a garnish, so whatever the model wrote is held to the song section's limits (this runs on every reply, fallback included): silent in the intro, a few quiet chops in the breakdown, up to 6 rising chops per bar in a build (velocity 0.7 at most) and up to 8 in a drop (0.8 at most). The vox bus itself sits below the melody's, so the vox is never louder than the melody even at those velocities.
  * A hit with no velocity gets the cap. Too many hits are thinned evenly, not cut off at the end of the bar.
  */
 export const VOX_LIMITS: Record<SectionName, { hits: number; velocity: number }> = {
   intro: { hits: 0, velocity: 0 },
-  build: { hits: 6, velocity: 0.65 },
-  drop: { hits: 8, velocity: 0.7 },
-  breakdown: { hits: 1, velocity: 0.45 },
+  build: { hits: 6, velocity: 0.7 },
+  drop: { hits: 8, velocity: 0.8 },
+  breakdown: { hits: 1, velocity: 0.5 },
 };
 export function shapeVox(bars: VoxBar[], section?: SectionName): VoxBar[] {
   const limit = section ? VOX_LIMITS[section] : { hits: 8, velocity: 0.7 };
   return bars.map((bar) => {
     const kept = bar.length <= limit.hits ? bar : limit.hits <= 0 ? [] : limit.hits === 1 ? [bar[0]] : Array.from({ length: limit.hits }, (_, i) => bar[Math.round((i * (bar.length - 1)) / (limit.hits - 1))]);
     return kept.map((hit) => ({ ...hit, velocity: Math.min(hit.velocity ?? limit.velocity, limit.velocity) }));
+  });
+}
+
+/**
+ * Chops derived straight from the melody, for when the vox has nothing of its own (the model failed or sat a drop out): every melody note is answered on the next free off-beat step with the same pitch (kept in octaves 3 to 5), cycling through the vowels. In a build only the first two answers of a bar are kept so it can still rise.
+ */
+export function chopMelody(melody: MelodyBar[], stepsPerBar: number, section?: SectionName): VoxBar[] {
+  const vowels = ['ah', 'oh', 'ee', 'oo'] as const;
+  let v = 0;
+  return melody.slice(0, 4).map((bar) => {
+    const taken = new Set(bar.map((n) => n.step));
+    const hits: VoxBar = [];
+    for (const n of bar) {
+      const step = [n.step + 2, n.step + 1, n.step + 3].find((s) => s < stepsPerBar && !taken.has(s));
+      if (step === undefined) continue;
+      taken.add(step);
+      let midi = midiOf(n.note);
+      if (midi === null) continue;
+      while (midi > 83) midi -= 12;
+      while (midi < 48) midi += 12;
+      hits.push({ step, note: nameOf(midi), vowel: vowels[v++ % 4], dur: '16n' });
+    }
+    hits.sort((a, b) => a.step - b.step);
+    return section === 'build' ? hits.slice(0, 2) : hits;
   });
 }
 

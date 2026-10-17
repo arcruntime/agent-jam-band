@@ -19,13 +19,15 @@ export const FORMANTS: Record<Vowel, readonly (readonly [hz: number, gain: numbe
 };
 
 /** Peakiness of each formant band: higher = a more obvious vowel, lower = a breathier one. */
-const FORMANT_Q = [7, 9, 11];
+const FORMANT_Q = [4.5, 6, 8];
 /** How fast the bands move to a new vowel (time constant in seconds): quick enough to be a new syllable, slow enough not to click. */
 const VOWEL_MORPH_S = 0.012;
 /** Chops are short. A longer duration from an agent is cut to this. */
 export const MAX_CHOP_S = 0.4;
 /** Output level the voice is built to: the filtered buzz is scaled so a full-strength chop peaks around this before the crusher. Set by measuring, see the vox tests. */
 const MAKEUP = 3.2;
+/** Gain after the crusher. Three narrow bandpass filters keep only about a third of the source's level, and the source itself (one FM oscillator) is a lot quieter than a Tone.Synth, so without this the chops sat about 10 dB under the melody even with the bus 3 dB below it. It is after the crusher so the quantizer input stays under full scale. */
+const BOOST = 2.1;
 
 export interface VoxVoiceOptions {
   /** Bit depth of the crusher: 4 is very robotic, 8 is gentle, 16 or more bypasses it. */
@@ -59,11 +61,14 @@ export function createVoxVoice(options: VoxVoiceOptions = {}): VoxVoice {
   const glideSeconds = options.glideSeconds ?? 0.04;
 
   const output = new Tone.Gain(1);
-  const lowpass = new Tone.Filter(7500, 'lowpass').connect(output); // tames the fizz the crusher adds
+  // Evens out the vowels: a sharp resonance can land on a harmonic (a loud "ah" at some pitches) while another vowel on another note is 9 dB down.
+  const leveler = new Tone.Compressor({ threshold: -26, ratio: 4, attack: 0.003, release: 0.08 }).connect(output);
+  const boost = new Tone.Gain(BOOST).connect(leveler);
+  const lowpass = new Tone.Filter(7500, 'lowpass').connect(boost); // tames the fizz the crusher adds
   const crusher = new Tone.WaveShaper(quantizer(options.bits ?? 6), 4096).connect(lowpass);
   const makeup = new Tone.Gain(MAKEUP).connect(crusher);
 
-  const env = new Tone.AmplitudeEnvelope({ attack: 0.006, decay: 0.1, sustain: 0.55, release: 0.07 });
+  const env = new Tone.AmplitudeEnvelope({ attack: 0.006, decay: 0.07, sustain: 0.8, release: 0.07 });
   const bands = FORMANTS.ah.map(([hz, gain], i) => {
     const filter = new Tone.Filter({ type: 'bandpass', frequency: hz, Q: FORMANT_Q[i] });
     const level = new Tone.Gain(gain);
@@ -114,6 +119,8 @@ export function createVoxVoice(options: VoxVoiceOptions = {}): VoxVoice {
       makeup.dispose();
       crusher.dispose();
       lowpass.dispose();
+      boost.dispose();
+      leveler.dispose();
       output.dispose();
     },
   };

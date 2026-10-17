@@ -24,6 +24,7 @@ import {
   previousVox,
   shapeVox,
   silentVox,
+  chopMelody,
 } from './fallback.js';
 import { getClient, reasoningParams } from './llm.js';
 import { recall, remember, type BandMemoryItem, type MemoryAgent, type MemoryCtx } from './memory.js';
@@ -136,7 +137,7 @@ const voxSystem = (m: Meter) =>
     `You are the VOX player in ${BAND}. You write robot vocal chops, as JSON, on a sixteenth-note step grid: short vowel-like hits that a synth voice sings through filters, like a robot choir (no words, only vowels).`,
     gridParagraph(m),
     `You are given the drummer's, the keys player's and the melody player's NEXT 4 BARS. Read them first. Chop the melody: answer or echo its notes with short vocal hits (the same pitches, or a chord tone from the keys part), mostly on off-beat steps and in the gaps where the melody rests, so you never crowd the lead. Every hit has a "vowel", exactly one of "ah" (open and wide), "oh" (round), "ee" (bright and tight) or "oo" (dark and soft): "ah" and "oh" suit longer or stronger hits, "ee" suits quick, high or accented ones and "oo" suits soft ones. Vary the vowels so the line seems to speak. Keep hits short ("16n" and "8n" mostly, "4n" at most for a held sigh).`,
-    `You are always quieter and sparser than the melody: never busier than it and never louder, so keep velocities modest (0.4 to 0.7). Silence is welcome: an empty array is a rest bar, and you may return four empty bars when the part is better without you.`,
+    `You sit under the melody and never cover it: keep velocities between 0.5 and 0.8, and leave its notes to ring. How busy you are depends on the section: in a build you play 2 to 6 chops a bar and climb, in a drop you play 5 to 8 chops in every bar so the hook is clearly heard, and in a breakdown you play at most one soft held vowel a bar. An empty array is a rest bar, which is for intros and breakdowns, not for builds and drops.`,
     MEMORY_PARAGRAPH,
     `You are especially good at calling back a melody motif from band_memory as a chop: keep its pitches, change the rhythm and give each hit a vowel, then set "echoes" to its id.`,
     STEER_PARAGRAPH,
@@ -339,7 +340,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'growing: root notes that get busier bar by bar, with octave jumps by bar 4, following the chord roots',
     keys: 'rising: begin with held chords, then repeated stabs or pulses in bars 3 and 4 with velocity climbing, following the chords',
     melody: 'a rising line: ascending notes that come more often each bar and finish high in bar 4, built from the chord tones',
-    vox: 'rising: a few quiet chops in bars 1 and 2 that come more often, then quick 16th-note chops climbing in pitch in bars 3 and 4, always fewer notes than the melody',
+    vox: 'rising: 2 or 3 chops in bar 1 and 2, then 4 to 6 quick 16th-note chops per bar climbing in pitch in bars 3 and 4, answering the melody',
   },
   drop: {
     energy: 'full: the whole band at full energy, the payoff of the song',
@@ -347,7 +348,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'full: the driving bassline locked to the kick and syncopated, built on the root of each bar\'s chord, at strong velocity',
     keys: 'full: bright rhythmic chord stabs on kick and snare steps and on the group starts, strong velocity, the chord of each bar',
     melody: 'the hook: the most memorable, rhythmic motif of the song, 6 to 12 notes in the strongest bars, on chord tones',
-    vox: 'the vocal hook: rhythmic chops on the off-beats and in the gaps of the melody, echoing the melody\'s motif, with leaps between vowels, leaving plenty of space',
+    vox: 'the vocal hook: 5 to 8 rhythmic chops in every bar, on the off-beats and in the gaps of the melody, echoing the melody\'s motif, with leaps between vowels, so the hook is clearly heard',
   },
   breakdown: {
     energy: 'low: stripped back, the song takes a breath',
@@ -550,17 +551,25 @@ export async function voxAgent(state: JamState, drums: DrumBar[], keys: ChordBar
     band_memory: await recallFor(ctx, 'vox'),
     task: 'Write the next 4 bars of robot vocal chops over the melody, chords and drums above.',
   });
-  return guarded<VoxBar>(
+  const reply = await guarded<VoxBar>(
     'vox',
     ctx,
     async () => {
       const out = await runAgent('vox', voxSystem(m), user, voxReplySchema(m.stepsPerBar));
       // Held to the section's limits whatever the model wrote (see shapeVox).
-      return { ...out, data: { ...out.data, bars: shapeVox(out.data.bars, plan?.section) } };
+      // A build or drop where the model wrote nothing at all still gets the melody chopped: those sections are where the vox is meant to be heard.
+      const wrote = out.data.bars.some((b) => b.length > 0);
+      const bars = !wrote && (plan?.section === 'drop' || plan?.section === 'build') ? chopMelody(melody, m.stepsPerBar, plan.section) : out.data.bars;
+      return { ...out, data: { ...out.data, bars: shapeVox(bars, plan?.section) } };
     },
     () => {
       const previous = previousVox(state);
-      return { bars: shapeVox(previous ?? silentVox(), plan?.section), source: previous ? 'previous block' : 'silence' };
+      const loud = plan?.section === 'drop' || plan?.section === 'build';
+      const bars = previous && previous.some((b) => b.length) ? previous : loud ? chopMelody(melody, m.stepsPerBar, plan.section) : silentVox();
+      return { bars: shapeVox(bars, plan?.section), source: bars === previous ? 'previous block' : loud ? 'melody chops' : 'silence' };
     },
   );
+  // One line per block so a quiet vox is easy to explain: what section it was, how many chops each bar got and whether they came from the model.
+  console.log(`[vox] section=${plan?.section ?? '-'} hits/bar=${JSON.stringify(reply.bars.map((b) => b.length))} velocity<=${Math.max(0, ...reply.bars.flat().map((h) => h.velocity ?? 0)).toFixed(2)} ${reply.fallback ? 'FALLBACK' : 'model'} ${reply.latencyMs}ms`);
+  return reply;
 }

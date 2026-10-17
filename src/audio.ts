@@ -189,7 +189,7 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
 };
 
 /** The vox sits this far under the melody's own level (dB), on top of the server capping its velocity below the melody's. Chosen by measuring with the same hit on both: see the vox tests. */
-const VOX_BELOW_MELODY_DB = 3;
+const VOX_BELOW_MELODY_DB = 4;
 /** Crusher depth per preset: gritty on the electronic ones, gentle on the warm ones. */
 const VOX_BITS: Record<SoundPreset, number> = { lofi: 6, futurebass: 5, house: 5, rock: 7, ambient: 7, dnb: 5, jazz: 8, hiphop: 6 };
 
@@ -230,6 +230,13 @@ export interface Rig {
   silence(): void;
   /** The gain node that ducks the keys on every kick (exposed for tests). */
   readonly duckGain: Tone.Gain;
+  /** Record the master output (after the limiter). Resolves once recording has started, or false if the browser cannot record. */
+  startRecording(): Promise<boolean>;
+  /** Stop recording and return the file (webm in Chrome and Firefox), or null if nothing was recording. */
+  stopRecording(): Promise<Blob | null>;
+  readonly recording: boolean;
+  /** How many chops were really triggered since the page opened, and the last one (exposed for tests and debugging). */
+  voxStats(): { triggered: number; lastNote: string | null; lastVowel: string | null; lastVelocity: number };
   /** The gate and level of the vox (exposed for tests): its gain is 0 when the Studio vox switch is off. */
   readonly voxBus: Tone.Gain;
   readonly preset: SoundPreset | null;
@@ -245,6 +252,9 @@ export function createRig(): Rig {
   const eq = new Tone.EQ3().connect(compressor);
   const processed = new Tone.Gain(1).connect(eq);
   const bypass = new Tone.Gain(0).connect(out);
+  // The recorder taps `out`, which is after the limiter (and after the bypass path), so a take sounds like the speakers do. It is made on first use because not every browser has MediaRecorder.
+  let recorder: Tone.Recorder | null = null;
+  let recording = false;
   const master = new Tone.Filter(20000, 'lowpass');
   master.connect(processed);
   master.connect(bypass);
@@ -319,6 +329,7 @@ export function createRig(): Rig {
   voxBus.connect(voxPan);
   voxBus.connect(voxSend);
   const voxVoice = createVoxVoice({ bits: VOX_BITS.lofi });
+  const voxCount = { triggered: 0, lastNote: null as string | null, lastVowel: null as string | null, lastVelocity: 0 };
   voxVoice.output.connect(voxBus);
   /** Where the vox bus sits for the current preset: under the melody, or shut when the Studio switch is off. */
   const voxLevel = () => (studio.vox ? Tone.dbToGain(settings.melody.volume - VOX_BELOW_MELODY_DB) : 0);
@@ -450,6 +461,36 @@ export function createRig(): Rig {
     get duckGain() {
       return duck;
     },
+    async startRecording() {
+      if (recording) return true;
+      try {
+        recorder ??= new Tone.Recorder();
+        out.connect(recorder);
+        await recorder.start();
+        recording = true;
+        return true;
+      } catch (err) {
+        console.warn('[audio] recording could not start:', err);
+        try { if (recorder) out.disconnect(recorder); } catch { /* not connected */ }
+        return false;
+      }
+    },
+    async stopRecording() {
+      if (!recording || !recorder) return null;
+      recording = false;
+      try {
+        return await recorder.stop();
+      } catch (err) {
+        console.warn('[audio] recording could not be finished:', err);
+        return null;
+      } finally {
+        try { out.disconnect(recorder); } catch { /* already gone */ }
+      }
+    },
+    get recording() {
+      return recording;
+    },
+    voxStats: () => ({ ...voxCount }),
     get voxBus() {
       return voxBus;
     },
@@ -587,7 +628,13 @@ export function createRig(): Rig {
       }
       for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
       // Vox off: nothing is triggered at all (the gate is shut as well, so a chop already ringing fades out).
-      if (studio.vox) for (const n of ev.vox ?? []) safely('vox', () => voxVoice.sing(n.note, n.vowel, Math.min(MAX_CHOP_S, Tone.Time(n.dur).toSeconds()), time + jit(), n.velocity));
+      if (studio.vox) for (const n of ev.vox ?? []) safely('vox', () => {
+        voxVoice.sing(n.note, n.vowel, Math.min(MAX_CHOP_S, Tone.Time(n.dur).toSeconds()), time + jit(), n.velocity);
+        voxCount.triggered++;
+        voxCount.lastNote = n.note;
+        voxCount.lastVowel = n.vowel;
+        voxCount.lastVelocity = n.velocity;
+      });
     },
 
     silence() {

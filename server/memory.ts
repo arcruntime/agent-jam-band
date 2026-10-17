@@ -180,6 +180,21 @@ export function discardBlocks(sessionId: string, blocks: number[]) {
 }
 
 /** A live steer: (:Steer {text})-[:CHANGED]->(:Session), and the session now carries the new settings. */
+/** A take the listener recorded: which song bars it covers and how long it ran. Stored as (:Recording)-[:IN_SESSION]->(:Session); the audio itself is only ever downloaded to their computer. */
+export function rememberRecording(sessionId: string, rec: { id: string; startBar: number; endBar: number; durationSec: number }) {
+  enqueue('recording', () =>
+    query(
+      'write',
+      `MERGE (s:Session {id: $sid})
+       MERGE (r:Recording {id: $id})
+         ON CREATE SET r.createdAt = timestamp()
+         SET r.startBar = toInteger($startBar), r.endBar = toInteger($endBar), r.durationSec = toInteger($durationSec)
+       MERGE (r)-[:IN_SESSION]->(s)`,
+      { sid: sessionId, id: `${sessionId}:rec:${rec.id}`, startBar: rec.startBar, endBar: rec.endBar, durationSec: rec.durationSec },
+    ),
+  );
+}
+
 export function rememberSteer(
   sessionId: string,
   steer: { id: string; text: string; atBlock: number; why: string },
@@ -207,6 +222,7 @@ export function ensureSchema() {
       'CREATE CONSTRAINT motif_id IF NOT EXISTS FOR (m:Motif) REQUIRE m.id IS UNIQUE',
       'CREATE CONSTRAINT agent_name IF NOT EXISTS FOR (a:Agent) REQUIRE a.name IS UNIQUE',
       'CREATE CONSTRAINT steer_id IF NOT EXISTS FOR (t:Steer) REQUIRE t.id IS UNIQUE',
+      'CREATE CONSTRAINT recording_id IF NOT EXISTS FOR (r:Recording) REQUIRE r.id IS UNIQUE',
     ]) {
       await query('write', q);
     }

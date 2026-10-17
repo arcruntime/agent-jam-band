@@ -54,6 +54,10 @@ button {
   cursor: pointer;
 }
 button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+button.rec.on { color: #ff5a5a; border-color: #ff5a5a; }
+.rec-timer { color: #ff5a5a; font-variant-numeric: tabular-nums; font-weight: 800; align-self: center; white-space: nowrap; }
+.rec-timer::before { content: ''; display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; background: #ff5a5a; animation: recblink 1.2s ease-in-out infinite; }
+@keyframes recblink { 50% { opacity: 0.25; } }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---- page frame: top strip, then chat | graph + studio ---- */

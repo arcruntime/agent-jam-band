@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SECTION_NAMES } from '../shared/arrangement.js';
 import { TIME_SIGNATURES } from '../shared/meter.js';
 
 export const BARS = 4;
@@ -135,6 +136,9 @@ export const conductorReplySchema = z.object({
   timeSignature: timeSignatureSchema,
   // Lenient on purpose: a missing or odd preset is repaired from the vibe instead of costing a retry.
   preset: z.string().optional(),
+  // Lenient on purpose, like the preset: the arrangement and a steer's section are repaired by sanitizeArrangement and sectionNameOf instead of costing a retry.
+  sections: z.unknown().optional(),
+  section: z.unknown().optional(),
   why,
 });
 
@@ -168,6 +172,14 @@ export const melodyReplySchema = (steps: number) =>
   });
 
 // ---------- Requests ----------
+
+/** What a musician is told about the block it writes: the song section and the chord of each of the 4 bars. */
+export const blockPlanSchema = z.object({
+  section: z.enum(SECTION_NAMES),
+  sectionBar: z.number().int().min(1).max(64),
+  sectionBars: z.number().int().min(4).max(64),
+  chords: z.array(z.string().trim().max(12)).length(BARS),
+});
 
 export const conductorRequestSchema = z.object({
   vibe: z.string().trim().min(1).max(300),

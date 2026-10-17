@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SECTION_NAMES } from '../shared/arrangement.js';
 import type { BassBar, ChordBar, DrumBar, GraphLink, GraphNode, GraphPayload, MelodyBar } from '../shared/types.js';
 import { query, toNum } from './graph.js';
 
@@ -12,7 +13,12 @@ export const MEMORY_AGENTS: readonly MemoryAgent[] = ['drums', 'bass', 'keys', '
 
 const idPart = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 export const sessionIdSchema = idPart;
-export const memoryCtxSchema = z.object({ sessionId: idPart, block: z.number().int().min(1).max(100000) });
+export const memoryCtxSchema = z.object({
+  sessionId: idPart,
+  block: z.number().int().min(1).max(100000),
+  /** The song section this block belongs to: its name and the song bar it started on (so two drops are two Section nodes) */
+  section: z.object({ name: z.enum(SECTION_NAMES), startBar: z.number().int().min(1).max(100000) }).optional(),
+});
 export type MemoryCtx = z.infer<typeof memoryCtxSchema>;
 
 export interface Echo {
@@ -108,6 +114,8 @@ export function remember(ctx: MemoryCtx, agent: MemoryAgent, motif: { bars: unkn
     pattern: JSON.stringify(motif.bars),
     summary: summarize(agent, motif.bars, motif.why, motif.fallback),
     fallback: motif.fallback,
+    secName: ctx.section?.name ?? null,
+    secStart: ctx.section?.startBar ?? null,
     lockId: lockAgent ? motifId(ctx.sessionId, ctx.block, lockAgent) : null,
     echoId: motif.echoes?.id ?? null,
     reason: motif.echoes?.reason ?? null,
@@ -119,6 +127,9 @@ export function remember(ctx: MemoryCtx, agent: MemoryAgent, motif: { bars: unkn
       `MERGE (s:Session {id: $sid})
        MERGE (b:Block {index: toInteger($block)})-[:IN_SESSION]->(s)
          ON CREATE SET b.bars = 4
+       FOREACH (sx IN CASE WHEN $secName IS NULL THEN [] ELSE [1] END |
+         MERGE (sec:Section {name: $secName, startBar: toInteger($secStart)})-[:IN_SESSION]->(s)
+         MERGE (b)-[:IN_SECTION]->(sec))
        MERGE (m:Motif {id: $id})
          SET m.agent = $agent, m.pattern_json = $pattern, m.summary = $summary, m.fallback = $fallback, m.createdAt = timestamp()
        MERGE (m)-[:IN_BLOCK]->(b)
@@ -142,16 +153,24 @@ export function discardBlocks(sessionId: string, blocks: number[]) {
   const set = discarded.get(sessionId) ?? new Set<number>();
   for (const n of fresh) set.add(n);
   discarded.set(sessionId, set);
-  enqueue('discard', () =>
-    query(
+  enqueue('discard', async () => {
+    await query(
       'write',
       `MATCH (b:Block)-[:IN_SESSION]->(:Session {id: $sid})
        WHERE b.index IN $blocks
        OPTIONAL MATCH (m:Motif)-[:IN_BLOCK]->(b)
        DETACH DELETE m, b`,
       { sid: sessionId, blocks: fresh },
-    ),
-  );
+    );
+    // A section that only existed for the discarded blocks (a jump skipped it) goes too.
+    await query(
+      'write',
+      `MATCH (sec:Section)-[:IN_SESSION]->(:Session {id: $sid})
+       WHERE NOT (:Block)-[:IN_SECTION]->(sec)
+       DETACH DELETE sec`,
+      { sid: sessionId },
+    );
+  });
 }
 
 /** A live steer: (:Steer {text})-[:CHANGED]->(:Session), and the session now carries the new settings. */
@@ -218,7 +237,7 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
   try {
     await flush();
     const p = { sid: sessionId };
-    const [sessionRows, blockRows, motifRows, playedRows, relRows, steerRows] = await Promise.all([
+    const [sessionRows, blockRows, motifRows, playedRows, relRows, steerRows, sectionRows, blockSectionRows] = await Promise.all([
       query('read', 'MATCH (s:Session {id: $sid}) RETURN s.vibe AS vibe', p),
       query('read', 'MATCH (b:Block)-[:IN_SESSION]->(:Session {id: $sid}) RETURN b.index AS index ORDER BY b.index', p),
       query(
@@ -236,8 +255,10 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
         p,
       ),
       query('read', 'MATCH (t:Steer)-[:CHANGED]->(:Session {id: $sid}) RETURN t.id AS id, t.text AS text, t.why AS why, t.atBlock AS atBlock ORDER BY t.createdAt', p),
+      query('read', 'MATCH (sec:Section)-[:IN_SESSION]->(:Session {id: $sid}) RETURN sec.name AS name, sec.startBar AS startBar ORDER BY sec.startBar', p),
+      query('read', 'MATCH (b:Block)-[:IN_SECTION]->(sec:Section)-[:IN_SESSION]->(:Session {id: $sid}) RETURN b.index AS block, sec.startBar AS startBar', p),
     ]);
-    if (!sessionRows || !blockRows || !motifRows || !playedRows || !relRows || !steerRows) return empty;
+    if (!sessionRows || !blockRows || !motifRows || !playedRows || !relRows || !steerRows || !sectionRows || !blockSectionRows) return empty;
 
     const nodes: GraphNode[] = [];
     const links: GraphLink[] = [];
@@ -248,6 +269,18 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
       const index = toNum(r.get('index'));
       nodes.push({ id: `block:${index}`, type: 'block', label: `block ${index}`, block: index });
       if (sessionRows.length) links.push({ source: `block:${index}`, target: sessionNode, type: 'IN_SESSION' });
+    }
+    // Song sections: one node per section instance (two drops are two nodes), linked to the session and to each of its blocks.
+    for (const r of sectionRows) {
+      const name = String(r.get('name'));
+      const startBar = toNum(r.get('startBar'));
+      nodes.push({ id: `section:${startBar}`, type: 'section', label: name, summary: `${name} · from bar ${startBar}` });
+      if (sessionRows.length) links.push({ source: `section:${startBar}`, target: sessionNode, type: 'IN_SESSION' });
+    }
+    const sectionIds = new Set(nodes.filter((n) => n.type === 'section').map((n) => n.id));
+    for (const r of blockSectionRows) {
+      const target = `section:${toNum(r.get('startBar'))}`;
+      if (sectionIds.has(target)) links.push({ source: `block:${toNum(r.get('block'))}`, target, type: 'IN_SECTION' });
     }
     const agents = new Set<string>();
     for (const r of motifRows) {

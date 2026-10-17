@@ -1,4 +1,5 @@
 /** Types shared by the Express backend and the Vite frontend. */
+import type { Arrangement, SectionName } from './arrangement.js';
 import type { TimeSignature } from './meter.js';
 import type { SoundPreset } from './presets.js';
 
@@ -114,11 +115,15 @@ export interface ConductorReply {
   tokens?: TokenUsage;
   latencyMs: number;
   fallback?: boolean;
+  /** The song structure for a new session (sections with a chord progression each). Always present on a first reply, even when the conductor fell back. */
+  arrangement?: Arrangement;
+  /** On a live steer: the song section the listener asked to jump to ("drop" jumps to the drop at the next block boundary) */
+  section?: SectionName;
 }
 
 // ---------- Band memory (Neo4j) ----------
 
-export type GraphNodeType = 'session' | 'block' | 'agent' | 'motif' | 'steer';
+export type GraphNodeType = 'session' | 'block' | 'agent' | 'motif' | 'steer' | 'section';
 
 export interface GraphNode {
   id: string;
@@ -131,7 +136,7 @@ export interface GraphNode {
   summary?: string;
 }
 
-export type GraphLinkType = 'IN_SESSION' | 'IN_BLOCK' | 'PLAYED' | 'ECHOES' | 'LOCKS_TO' | 'CHANGED';
+export type GraphLinkType = 'IN_SESSION' | 'IN_BLOCK' | 'IN_SECTION' | 'PLAYED' | 'ECHOES' | 'LOCKS_TO' | 'CHANGED';
 
 export interface GraphLink {
   source: string;

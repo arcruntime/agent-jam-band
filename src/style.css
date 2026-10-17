@@ -79,6 +79,18 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .pip.on { background: var(--text); transform: scale(1.25); }
 .pip.one.on { background: var(--accent); }
 
+/* ---- song section, next to the beat counter ---- */
+.section { --sec: var(--muted); display: flex; flex-direction: column; justify-content: center; min-width: 190px; padding: 4px 18px; border-radius: 12px; background: var(--panel); border-left: 4px solid var(--sec); }
+.section[data-section='intro'] { --sec: #8fb4ff; }
+.section[data-section='build'] { --sec: #ffd166; }
+.section[data-section='drop'] { --sec: #ff5f7a; }
+.section[data-section='breakdown'] { --sec: #4fd1c5; }
+.sec-label { color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.sec-name { font-size: 34px; line-height: 1.1; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase; color: var(--sec); }
+.sec-bar { color: var(--muted); font-size: 14px; min-height: 1.3em; font-variant-numeric: tabular-nums; }
+.section.flash { animation: secflash 1.1s ease-out; }
+@keyframes secflash { 0% { box-shadow: 0 0 0 0 var(--sec); background: color-mix(in srgb, var(--sec) 30%, var(--panel)); } 100% { box-shadow: 0 0 0 14px transparent; background: var(--panel); } }
+
 .nowbox { flex: 1; min-width: 200px; align-self: center; }
 .now { margin: 0; font-weight: 700; }
 .next { margin: 0; color: var(--muted); font-size: 14px; min-height: 1.4em; }
@@ -108,11 +120,26 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .graph-host { position: relative; width: 100%; min-width: 0; flex: 1; min-height: 220px; border-radius: 10px; background: var(--bg); overflow: hidden; }
 .graph-empty { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); font-size: 15px; pointer-events: none; }
 .graph-empty[hidden] { display: none; }
-.legend { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 13px; }
-.legend li { display: flex; align-items: center; gap: 6px; }
-.legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.legend i.echo { background: transparent; border: 2px solid #fff; }
-.legend i.steer { border-radius: 2px; transform: rotate(45deg) scale(0.85); background: var(--steer); }
+.graph { position: relative; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.panel-head h2 { margin: 0; }
+button.info { width: 30px; height: 30px; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); border: 1px solid var(--line); font-size: 18px; line-height: 1; }
+button.info:hover, button.info[aria-expanded='true'] { color: var(--text); border-color: var(--muted); }
+
+/* ---- graph legend: an overlay on the graph, closed by default ---- */
+.legend-pop { position: absolute; z-index: 5; top: 50px; right: 16px; width: min(380px, calc(100% - 32px)); padding: 12px 14px; border-radius: 10px; background: rgba(20, 22, 30, 0.96); border: 1px solid var(--line); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5); font-size: 14px; line-height: 1.35; }
+.legend-pop[hidden] { display: none; }
+.legend-pop ul { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.legend-pop li { display: grid; grid-template-columns: 26px 1fr; gap: 8px; align-items: center; }
+.legend-pop li i { justify-self: center; display: block; }
+.legend-pop p { margin: 0; color: var(--muted); font-size: 13px; }
+.k-agent { width: 16px; height: 16px; border-radius: 50%; background: var(--keys); }
+.k-motif { width: 8px; height: 8px; border-radius: 50%; background: var(--melody); }
+.k-block { width: 6px; height: 6px; border-radius: 50%; background: #3a3f52; outline: 1px solid #5a6078; }
+.k-echo { width: 24px; height: 0; border-top: 3px solid #fff; }
+.k-locks { width: 24px; height: 0; border-top: 2px dashed var(--bass); }
+.k-steer { width: 12px; height: 12px; background: var(--steer); transform: rotate(45deg) scale(0.85); }
+.k-section { width: 14px; height: 14px; border-radius: 3px; background: #cdd3ff; }
 
 /* ---- chat messages ---- */
 .msg { border-left: 4px solid var(--line); padding: 2px 0 2px 12px; }

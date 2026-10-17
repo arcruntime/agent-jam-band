@@ -25,6 +25,7 @@ const ECHO_HILITE_MS = 2000;
 const STRUCTURE = 'rgba(139, 143, 163, 0.16)';
 const ECHO = '#ffffff';
 const STEER = '#ff5fa2';
+const SECTION = '#cdd3ff';
 
 const idOf = (end: string | GNode) => (typeof end === 'string' ? end : end.id);
 
@@ -60,6 +61,7 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
     .nodeLabel((n) => {
       const node = n as GNode;
       if (node.type === 'steer') return `<b>Steer${node.block ? ` · block ${node.block}` : ''}</b><br>${escapeHtml(node.summary ?? node.label)}`;
+      if (node.type === 'section') return `<b>${escapeHtml(node.label)}</b><br>${escapeHtml(node.summary ?? '')}`;
       if (node.type === 'motif') return `<b>${escapeHtml(node.agent ?? '')} · block ${node.block ?? ''}</b><br>${escapeHtml(node.summary ?? '')}`;
       return escapeHtml(node.label);
     })
@@ -93,11 +95,11 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
   graph.d3Force('charge')?.strength(-42);
   graph
     .d3Force('link')
-    ?.distance((l: GLink) => ({ ECHOES: 90, PLAYED: 62, IN_BLOCK: 22, IN_SESSION: 34, LOCKS_TO: 24, CHANGED: 70 })[l.type] ?? 40)
+    ?.distance((l: GLink) => ({ ECHOES: 90, PLAYED: 62, IN_BLOCK: 22, IN_SESSION: 34, IN_SECTION: 30, LOCKS_TO: 24, CHANGED: 70 })[l.type] ?? 40)
     .strength?.(0.5);
 
   function radius(n: GNode) {
-    return n.type === 'agent' ? 9 : n.type === 'steer' ? 8 : n.type === 'motif' ? 6 : n.type === 'session' ? 4 : 3;
+    return n.type === 'agent' ? 9 : n.type === 'steer' ? 8 : n.type === 'section' ? 7 : n.type === 'motif' ? 6 : n.type === 'session' ? 4 : 3;
   }
 
   function paint(n: GNode, ctx: CanvasRenderingContext2D, scale: number) {
@@ -129,6 +131,22 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
         ctx.lineWidth = 2.5 * (1 - t) + 0.5;
         ctx.stroke();
       }
+    }
+    if (n.type === 'section') {
+      // A rounded square, so a song section never reads as a block, a motif or an agent.
+      const half = r + 1;
+      ctx.beginPath();
+      ctx.roundRect(x - half, y - half, half * 2, half * 2, 3);
+      ctx.fillStyle = SECTION;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(14,15,19,0.9)';
+      ctx.stroke();
+      ctx.font = `${10 / scale}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = SECTION;
+      ctx.fillText(n.label, x, y + half + 11 / scale);
+      return;
     }
     if (n.type === 'steer') {
       // A diamond in its own colour, so a steer never reads as a motif.

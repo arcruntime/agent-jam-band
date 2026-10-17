@@ -14,6 +14,7 @@ import type {
   MelodyBar,
   TokenUsage,
 } from '../shared/types';
+import { defaultArrangement, describeArrangement, reharmonize, sanitizeArrangement, sectionStart, slotsOf, type Arrangement, type BlockSlot, type SectionName } from '../shared/arrangement';
 import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
 import { getRig, type StudioKey } from './audio';
 import { createGraphPanel, type EchoEvent } from './graph';
@@ -48,7 +49,17 @@ const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
 ];
 
 /** Quick steers: the label is also the text sent to the conductor. */
-const QUICK_STEERS = ['7/8', '5/4', 'half-time', 'drop', 'darker', 'genre: jazz'];
+const QUICK_STEERS = ['7/8', '5/4', 'half-time', 'drop', 'breakdown', 'darker', 'genre: jazz'];
+
+/** Where one block sits in the song. */
+interface Planned {
+  /** Index into the session's slots (the arrangement cut into 4-bar blocks) */
+  pos: number;
+  slot: BlockSlot;
+  /** Song bar (1-based, counted through every loop) this block starts on, and the bar its section instance started on */
+  startBar: number;
+  sectionStartBar: number;
+}
 
 /** Everything that belongs to one Start..Stop run. Replaced on every Start so stale async work can detect it was cancelled. */
 interface Session {
@@ -82,6 +93,17 @@ interface Session {
   beats: number;
   stepsPerBeat: number;
   steering: boolean;
+  /** The song structure the conductor planned, and the same cut into 4-bar blocks */
+  arrangement: Arrangement;
+  slots: BlockSlot[];
+  /** The song position of every block written or playing, by block number (numbers skip after a steer, so this is not arithmetic) */
+  plans: Map<number, Planned>;
+  /** Which slot and which song bar the next block to be written gets */
+  nextPos: number;
+  nextBar: number;
+  /** The song bar of the section instance last announced in the chat, and the block the header is showing (it follows the audio, not the scheduler) */
+  shownSection: number;
+  shownBlock: number;
   waitFirst?: { resolve: () => void; reject: (err: Error) => void };
 }
 
@@ -124,6 +146,11 @@ app.innerHTML = `
           <div class="beat-num" id="beatNum">–</div>
           <div class="beat-pips" id="beatPips"></div>
         </div>
+        <div class="section" id="section" aria-live="polite">
+          <span class="sec-label">Section</span>
+          <b class="sec-name" id="secName">–</b>
+          <span class="sec-bar" id="secBar"></span>
+        </div>
         <div class="tokens" id="tokens" title="Tokens used this session, from the model's usage reports">
           <div class="tok total"><span>Tokens</span><b id="tokTotal">0</b></div>
           ${TOKEN_AGENTS.map((a) => `<div class="tok" data-agent="${a}"><span>${a}</span><b>0</b></div>`).join('')}
@@ -154,15 +181,22 @@ app.innerHTML = `
       </div>
       <div class="right">
         <aside class="panel graph">
-          <h2>Band memory</h2>
-          <ul class="legend">
-            <li><i style="background: var(--drums)"></i>Drums</li>
-            <li><i style="background: var(--bass)"></i>Bass</li>
-            <li><i style="background: var(--keys)"></i>Keys</li>
-            <li><i style="background: var(--melody)"></i>Melody</li>
-            <li><i class="echo"></i>Echo</li>
-            <li><i class="steer"></i>Steer</li>
-          </ul>
+          <div class="panel-head">
+            <h2>Band memory</h2>
+            <button type="button" id="legendBtn" class="info" aria-label="What am I looking at?" aria-expanded="false" aria-controls="legendPop">ⓘ</button>
+          </div>
+          <div id="legendPop" class="legend-pop" role="note" hidden>
+            <ul>
+              <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: drums, bass, keys and melody, each in its own color</span></li>
+              <li><i class="k-motif"></i><span><b>Small colored dots</b> are motifs, the phrases an agent played</span></li>
+              <li><i class="k-block"></i><span><b>Grey</b> dots are blocks, four bars each</span></li>
+              <li><i class="k-echo"></i><span><b>White lines</b> are ECHOES: an agent called back another's idea</span></li>
+              <li><i class="k-locks"></i><span><b>Dashed</b> lines are LOCKS_TO: playing in sync</span></li>
+              <li><i class="k-steer"></i><span><b>Diamond</b> is a steer you gave the band</span></li>
+              <li><i class="k-section"></i><span><b>Rounded square</b> is a song section: intro, build, drop or breakdown</span></li>
+            </ul>
+            <p>The band's memory grows as they listen and call back each other's ideas.</p>
+          </div>
           <div id="graphHost" class="graph-host"></div>
         </aside>
         <section class="panel studio" id="studio">
@@ -204,6 +238,11 @@ const steerNote = document.querySelector<HTMLElement>('#steerNote')!;
 const beatEl = document.querySelector<HTMLElement>('#beat')!;
 const beatNumEl = document.querySelector<HTMLElement>('#beatNum')!;
 const beatPipsEl = document.querySelector<HTMLElement>('#beatPips')!;
+const sectionEl = document.querySelector<HTMLElement>('#section')!;
+const secNameEl = document.querySelector<HTMLElement>('#secName')!;
+const secBarEl = document.querySelector<HTMLElement>('#secBar')!;
+const legendBtn = document.querySelector<HTMLButtonElement>('#legendBtn')!;
+const legendPop = document.querySelector<HTMLElement>('#legendPop')!;
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphHost')!, {
@@ -280,6 +319,7 @@ function setMode(mode: Mode) {
     nowEl.textContent = warm ? 'Press Start to hear the band.' : 'Warming up the band…';
     nextEl.textContent = '';
     clearBeat();
+    clearSection();
   } else if (mode === 'loading') {
     nowEl.textContent = 'Starting…';
     nextEl.textContent = '';
@@ -315,6 +355,37 @@ function clearBeat() {
   beatEl.classList.remove('downbeat');
 }
 
+// ---------- Song section ----------
+
+function clearSection() {
+  secNameEl.textContent = '–';
+  secBarEl.textContent = '';
+  delete sectionEl.dataset.section;
+}
+
+/** Header: the section of the block that is playing and the bar within it. */
+function renderSection(s: Session) {
+  const plan = s.plans.get(s.shownBlock);
+  if (!plan) return;
+  secNameEl.textContent = plan.slot.section;
+  secBarEl.textContent = `bar ${plan.slot.sectionBar + s.bar} of ${plan.slot.sectionBars}`;
+  sectionEl.dataset.section = plan.slot.section;
+}
+
+/** A block just started playing: if it opens a new section (a new instance, so a second drop counts), flash the header and say so in the chat. */
+function announceSection(s: Session, n: number) {
+  const plan = s.plans.get(n);
+  if (!plan) return;
+  s.shownBlock = n;
+  renderSection(s);
+  if (plan.sectionStartBar === s.shownSection) return;
+  s.shownSection = plan.sectionStartBar;
+  sectionEl.classList.remove('flash');
+  void sectionEl.offsetWidth; // restart the animation
+  sectionEl.classList.add('flash');
+  log('system', `Section: ${plan.slot.section} (${plan.slot.sectionBars} bars)`);
+}
+
 function setSteerBusy(busy: boolean) {
   steerBtn.disabled = busy;
   steerText.disabled = busy;
@@ -331,6 +402,7 @@ function showSettings(c: ConductorSettings) {
 const barsOf = (n: number) => `${(n - 1) * BARS_PER_CHUNK + 1}–${n * BARS_PER_CHUNK}`;
 
 function renderStatus(s: Session) {
+  renderSection(s);
   if (s.current) {
     nowEl.textContent = `Playing bars ${barsOf(s.current.n)} (bar ${s.bar + 1} of ${BARS_PER_CHUNK})`;
   }
@@ -382,11 +454,45 @@ function barOf(s: Session, n: number, i: number) {
   return bar;
 }
 
+/** Gives block n its place in the song. Blocks are written in order, so each new one takes the next slot of the arrangement (the song loops). */
+function planFor(s: Session, n: number): Planned {
+  const known = s.plans.get(n);
+  if (known) return known;
+  const pos = s.nextPos % s.slots.length;
+  const slot = s.slots[pos];
+  const plan: Planned = { pos, slot, startBar: s.nextBar, sectionStartBar: s.nextBar - (slot.sectionBar - 1) };
+  s.plans.set(n, plan);
+  s.nextPos = (pos + 1) % s.slots.length;
+  s.nextBar += BARS_PER_CHUNK;
+  return plan;
+}
+
+/** After a steer threw the unplayed blocks away: the next block to write follows the one that is playing, or starts the section the listener asked for. */
+function continueSong(s: Session, jump: SectionName | null) {
+  const cur = s.current ? s.plans.get(s.current.n) : undefined;
+  if (cur) {
+    s.nextPos = (cur.pos + 1) % s.slots.length;
+    s.nextBar = cur.startBar + BARS_PER_CHUNK;
+  }
+  // Already in that section: carry on with the song instead of restarting it.
+  if (jump && cur?.slot.section !== jump) s.nextPos = sectionStart(s.slots, jump, s.nextPos) ?? s.nextPos;
+}
+
 /** One musician's turn: send the shared state plus the earlier parts, log its note, and record its bars in the shared state. */
 async function runStage<T>(s: Session, who: PartName, n: number, earlier: object, record: (bars: T[]) => void): Promise<T[]> {
   const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
   const epoch = s.epoch;
-  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier, memory: { sessionId: s.id, block: n } }, s.abort.signal);
+  // The drummer opens each block, so it is the one that gives the block its place in the song; the others find it there.
+  const planned = who === 'drums' ? planFor(s, n) : s.plans.get(n);
+  if (!planned) throw new Error('stopped');
+  const { slot } = planned;
+  const body = {
+    state: snapshot,
+    ...earlier,
+    memory: { sessionId: s.id, block: n, section: { name: slot.section, startBar: planned.sectionStartBar } },
+    plan: { section: slot.section, sectionBar: slot.sectionBar, sectionBars: slot.sectionBars, chords: slot.chords },
+  };
+  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, body, s.abort.signal);
   if (session !== s || s.epoch !== epoch) throw new Error('stopped'); // stopped, or steered away from while this was being written
   addTokens(who, reply.tokens);
   if (reply.why) log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
@@ -466,6 +572,13 @@ function newSession(vibe: string): Session {
     beats: 4,
     stepsPerBeat: 4,
     steering: false,
+    arrangement: defaultArrangement(DEFAULT_SETTINGS.key),
+    slots: slotsOf(defaultArrangement(DEFAULT_SETTINGS.key)),
+    plans: new Map(),
+    nextPos: 0,
+    nextBar: 1,
+    shownSection: 0,
+    shownBlock: 0,
     pipeline: new Pipeline<BlockParts>({
       bufferBlocks: BUFFER_BLOCKS,
 
@@ -533,6 +646,10 @@ function tick(s: Session, time: number) {
     if (next) {
       s.current = next;
       s.loopWarned = false;
+      const n = next.n;
+      Tone.getDraw().schedule(() => {
+        if (session === s) announceSection(s, n);
+      }, time);
       // A steer waits for exactly this moment: the first bar line where a block written for the new direction is ready.
       if (s.pending) {
         applyPending(s, time);
@@ -608,7 +725,10 @@ function resetGeneration(s: Session): number[] {
   const dropped = s.pipeline.reset();
   const starts = dropped.flatMap((n) => (s.blockStart.has(n) ? [s.blockStart.get(n)!] : []));
   if (starts.length) s.state.bars.length = Math.min(s.state.bars.length, Math.min(...starts));
-  for (const n of dropped) s.blockStart.delete(n);
+  for (const n of dropped) {
+    s.blockStart.delete(n);
+    s.plans.delete(n);
+  }
   return dropped;
 }
 
@@ -636,6 +756,7 @@ async function steer(raw: string) {
       steerNote.textContent = '';
       return;
     }
+    const prevKey = s.target.key;
     const next: ConductorSettings = { bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(out.bpm))), key: out.key, timeSignature: out.timeSignature, preset: out.preset };
     s.target = next;
     s.state.tempo = next.bpm;
@@ -643,9 +764,16 @@ async function steer(raw: string) {
     s.state.timeSignature = next.timeSignature;
     s.state.steer = { text, direction: out.why };
     s.pending = next;
+    // A new key means the planned chords would clash: same sections, new chords.
+    if (next.key !== prevKey) {
+      s.arrangement = reharmonize(s.arrangement, next.key);
+      s.slots = slotsOf(s.arrangement);
+    }
+    const jump = out.section && s.slots.some((sl) => sl.section === out.section) ? out.section : null;
     const dropped = resetGeneration(s);
+    continueSong(s, jump);
     s.pipeline.start(); // writes new blocks for the new direction
-    log('conductor', out.why, `steer · ${next.bpm} BPM · ${next.key} · ${next.timeSignature} · ${next.preset} · ${out.latencyMs} ms`);
+    log('conductor', out.why, `steer · ${next.bpm} BPM · ${next.key} · ${next.timeSignature} · ${next.preset}${jump ? ` · to the ${jump}` : ''} · ${out.latencyMs} ms`);
     steerNote.textContent = 'Changing at the next block boundary…';
     renderStatus(s);
     const done = dropped.length ? post('/api/memory/discard', { sessionId: s.id, blocks: dropped }).catch((e) => console.warn(`[client] discard failed: ${errMsg(e)}`)) : Promise.resolve();
@@ -696,8 +824,11 @@ async function start() {
     s.beats = meter.numerator;
     s.stepsPerBeat = 16 / meter.denominator;
     s.active = s.target = { bpm: c.bpm, key: c.key, timeSignature: c.timeSignature, preset: c.preset };
+    s.arrangement = sanitizeArrangement(c.arrangement, c.key);
+    s.slots = slotsOf(s.arrangement);
     showSettings(s.active);
     logConductor(c, overrides);
+    log('system', `Song plan: ${describeArrangement(s.arrangement)} bars, then it loops.`);
 
     // Tempo first: the delay time in the sound preset follows the bpm.
     transport.bpm.value = c.bpm;
@@ -735,6 +866,7 @@ async function start() {
   }, '4n');
   transport.start('+0.1');
   setMode('playing');
+  if (s.current) announceSection(s, s.current.n);
   renderStatus(s);
 }
 
@@ -751,6 +883,23 @@ function stop() {
   setMode('idle');
   log('system', 'Stopped.');
 }
+
+// ---------- Graph legend (an overlay, so it takes no permanent space) ----------
+
+function setLegend(open: boolean) {
+  legendPop.hidden = !open;
+  legendBtn.setAttribute('aria-expanded', String(open));
+}
+legendBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setLegend(legendPop.hidden === true);
+});
+document.addEventListener('click', (e) => {
+  if (!legendPop.hidden && !legendPop.contains(e.target as Node)) setLegend(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setLegend(false);
+});
 
 // ---------- Studio switches ----------
 
@@ -791,5 +940,5 @@ for (const el of [vibeEl, bpmEl]) {
 
 // Test hook for the headless checks (dev server only).
 if (import.meta.env.DEV) {
-  (window as unknown as { __jam: unknown }).__jam = { graph: graphPanel, rig: getRig(), tokens: () => Object.fromEntries(tokens) };
+  (window as unknown as { __jam: unknown }).__jam = { graph: graphPanel, rig: getRig(), tokens: () => Object.fromEntries(tokens), plans: () => (session ? [...session.plans.entries()].map(([n, p]) => ({ n, pos: p.pos, section: p.slot.section, startBar: p.startBar, sectionStartBar: p.sectionStartBar, chords: p.slot.chords })) : []) };
 }

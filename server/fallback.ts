@@ -2,6 +2,7 @@
  * What the band plays when an agent fails twice: its own previous block (transposed if the key moved), or a plain built-in pattern if there is no previous block yet.
  * Nothing here is ever shown in the UI; the callers log to the server console only.
  */
+import { sectionFromText, type SectionName } from '../shared/arrangement.js';
 import { TIME_SIGNATURES, type Meter, type TimeSignature } from '../shared/meter.js';
 import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
 import type { BassBar, ChordBar, ConductorOverrides, ConductorSettings, DrumBar, JamBar, JamState, MelodyBar } from '../shared/types.js';
@@ -182,6 +183,13 @@ const METER_HINT: Record<TimeSignature, string> = {
   '6/8': 'think two groups of three',
 };
 
+const SECTION_NOTE: Record<SectionName, string> = {
+  drop: 'Jumping to the drop: hit hard, heavy kick and bass, keys stab.',
+  breakdown: 'Jumping to the breakdown: strip it back and leave air.',
+  build: 'Jumping to the build: rising energy, more every bar.',
+  intro: 'Back to the intro: sparse and spacious.',
+};
+
 /** One step darker: major-ish keys go minor, dorian goes minor, minor goes phrygian. */
 const darkerKey = (key: string): string => {
   const tonic = /^\s*([A-G][#b]?)/.exec(key)?.[1] ?? 'A';
@@ -194,7 +202,7 @@ const darkerKey = (key: string): string => {
  * What a steer does when the conductor model cannot be reached or fails twice: obvious requests (a meter, half-time, drop, darker, a genre) are applied directly, anything else changes nothing.
  * An empty `why` means there was nothing to do, and the client then ignores the steer.
  */
-export function steerFallback(text: string, current: ConductorSettings): ConductorSettings & { why: string } {
+export function steerFallback(text: string, current: ConductorSettings): ConductorSettings & { why: string; section?: SectionName } {
   const next: ConductorSettings = { ...current };
   const notes: string[] = [];
   const meter = explicitMeter(text);
@@ -210,13 +218,14 @@ export function steerFallback(text: string, current: ConductorSettings): Conduct
     notes.push(`Changing genre to ${genre}: everyone, new tempo and new colors.`);
   }
   if (/half[- ]?time/i.test(text)) notes.push('Half-time feel: drums, snare on beat three and give the groove room.');
-  if (/\bdrop\b/i.test(text)) notes.push('The drop: hit hard, heavy kick and bass, keys stab.');
+  const section = sectionFromText(text);
+  if (section) notes.push(SECTION_NOTE[section]);
   if (/dark/i.test(text)) {
     next.key = darkerKey(next.key);
     next.bpm = overridesSafeBpm(Math.round(next.bpm * 0.92));
     notes.push('Going darker: lower voicings, minor colors, more space.');
   }
-  return { ...next, why: notes.join(' ').split(/\s+/).slice(0, 20).join(' ') };
+  return { ...next, why: notes.join(' ').split(/\s+/).slice(0, 20).join(' '), ...(section ? { section } : {}) };
 }
 
 const overridesSafeBpm = (n: number) => Math.min(180, Math.max(60, Math.round(n)));

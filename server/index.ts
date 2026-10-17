@@ -7,7 +7,7 @@ import { config } from './config.js';
 import { closeNeo4j, initNeo4j, onNeo4jConnected } from './graph.js';
 import { getClient } from './llm.js';
 import { discardBlocks, ensureSchema, loadGraph, memoryCtxSchema, rememberSession, rememberSteer, sessionIdSchema } from './memory.js';
-import { BARS, bassBarSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema } from './schemas.js';
+import { BARS, bassBarSchema, blockPlanSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema } from './schemas.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -85,18 +85,21 @@ route('/api/memory/discard', async (b) => {
 // Where this request belongs in the band's memory. A missing or malformed value just means no memory for this call.
 const memoryOf = (b: Record<string, unknown>) => memoryCtxSchema.safeParse(b.memory).data;
 
+// The song section and per-bar chords this block is written for. Missing or malformed means the agents just play without a plan.
+const planOf = (b: Record<string, unknown>) => blockPlanSchema.safeParse(b.plan).data;
+
 // Musicians, in order. Each gets the shared state plus every earlier part for the same 4 bars.
-route('/api/agents/drums', async (b) => drumsAgent(jamStateSchema.parse(b.state), memoryOf(b)));
+route('/api/agents/drums', async (b) => drumsAgent(jamStateSchema.parse(b.state), memoryOf(b), planOf(b)));
 
 route('/api/agents/bass', async (b) => {
   const state = jamStateSchema.parse(b.state);
-  return bassAgent(state, four(drumBarSchema(stepsFor(state))).parse(b.drums), memoryOf(b));
+  return bassAgent(state, four(drumBarSchema(stepsFor(state))).parse(b.drums), memoryOf(b), planOf(b));
 });
 
 route('/api/agents/keys', async (b) => {
   const state = jamStateSchema.parse(b.state);
   const steps = stepsFor(state);
-  return keysAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(bassBarSchema(steps)).parse(b.bass), memoryOf(b));
+  return keysAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(bassBarSchema(steps)).parse(b.bass), memoryOf(b), planOf(b));
 });
 
 route('/api/agents/melody', async (b) => {
@@ -108,6 +111,7 @@ route('/api/agents/melody', async (b) => {
     four(bassBarSchema(steps)).parse(b.bass),
     four(keysBarSchema(steps)).parse(b.keys),
     memoryOf(b),
+    planOf(b),
   );
 });
 

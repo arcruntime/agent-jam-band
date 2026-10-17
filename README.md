@@ -39,6 +39,16 @@ Five switches under the graph work live while the band plays, and none of them r
 
 Presets: lofi, futurebass, house, rock, ambient, dnb (fast, reese-style bass), jazz (swung ride, EP or piano keys) and hiphop (heavy swing, 808 drums). The conductor picks the closest preset from this list and names it, and why, in its chat line (for example "No garage kit, using house."). What each musician plays rhythmically is still decided by the agents; the preset sets the sound, swing and tempo feel.
 
+## Song structure
+
+The conductor plans a simple arrangement for the session: sections called intro, build, drop and breakdown, each with its own chord progression that repeats to give one chord per bar. The default is intro 8 bars, build 8, drop 16, breakdown 8, drop 16, and then the song loops back to the start; the conductor may adapt it to the vibe (3 to 7 sections, at most 64 bars, lengths in whole 4-bar blocks). If the model returns something unusable, a built-in arrangement in the song's key is used instead, so the band never plays without a plan.
+
+Every 4-bar block belongs to one section. Each musician is told the section and the chord of each of its four bars (with the chord's tones), plus a short note on what its instrument does there: intro and breakdown are sparse, a build rises bar by bar, a drop is the full band. The header shows the current section next to the beat counter, and the chat announces each new one.
+
+A steer can override the section: typing "drop", "breakdown", "build" or "intro" (or pressing the quick button) throws away what was written for the old direction and jumps to the start of that section at the next block boundary, and if you are already in that section the song just carries on. A steer that changes the key re-harmonizes the chords for the new key.
+
+In Neo4j each section is stored as `(:Section {name, startBar})-[:IN_SESSION]->(:Session)` and every block links to its section with `(:Block)-[:IN_SECTION]->(:Section)`. `startBar` is the song bar the section started on, counted through the loops, so a second drop is its own node. Sections show in the band-memory graph as rounded squares. If you steer away from blocks that never played, a section that only existed for them is removed with them. The ⓘ button in the Band memory panel opens a compact legend of every symbol.
+
 ## Sample credits and licenses
 
 - **smplr**, the sampler library, by danigb: MIT license. https://github.com/danigb/smplr

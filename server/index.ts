@@ -1,11 +1,12 @@
 import express from 'express';
 import { z } from 'zod';
 import { meterOf } from '../shared/meter.js';
-import { AgentError, bassAgent, conductorAgent, drumsAgent, keysAgent, melodyAgent } from './agents.js';
+import type { ConductorSettings } from '../shared/types.js';
+import { AgentError, bassAgent, conductorAgent, conductorSteerAgent, drumsAgent, keysAgent, melodyAgent } from './agents.js';
 import { config } from './config.js';
 import { closeNeo4j, initNeo4j, onNeo4jConnected } from './graph.js';
 import { getClient } from './llm.js';
-import { ensureSchema, loadGraph, memoryCtxSchema, rememberSession, sessionIdSchema } from './memory.js';
+import { discardBlocks, ensureSchema, loadGraph, memoryCtxSchema, rememberSession, rememberSteer, sessionIdSchema } from './memory.js';
 import { BARS, bassBarSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema } from './schemas.js';
 
 const app = express();
@@ -60,10 +61,25 @@ const stepsFor = (state: z.infer<typeof jamStateSchema>) => meterOf(state.timeSi
 
 // Conductor: runs first on each new vibe. Returns { bpm, key, timeSignature, why, latencyMs }.
 route('/api/agents/conductor', async (b) => {
-  const { vibe, overrides, sessionId } = conductorRequestSchema.parse(b);
+  const { vibe, overrides, sessionId, steer } = conductorRequestSchema.parse(b);
+  if (steer) {
+    // Live steering: the conductor answers with the settings to switch to. An empty why means nothing changed, so nothing is stored.
+    const out = await conductorSteerAgent(vibe, steer.current as ConductorSettings, steer.text);
+    if (sessionId && out.why) {
+      rememberSteer(sessionId, { id: steer.id ?? String(Date.now()), text: steer.text, atBlock: steer.atBlock ?? 0, why: out.why }, { bpm: out.bpm, key: out.key, timeSignature: out.timeSignature, preset: out.preset });
+    }
+    return out;
+  }
   const reply = await conductorAgent(vibe, overrides);
   if (sessionId) rememberSession(sessionId, { vibe, bpm: reply.bpm, key: reply.key, timeSignature: reply.timeSignature, preset: reply.preset });
   return reply;
+});
+
+// Blocks generated for the old direction that will never play after a live steer: drop them from the band's memory.
+route('/api/memory/discard', async (b) => {
+  const { sessionId, blocks } = z.object({ sessionId: sessionIdSchema, blocks: z.array(z.number().int().min(1).max(100000)).max(64) }).parse(b);
+  discardBlocks(sessionId, blocks);
+  return { ok: true };
 });
 
 // Where this request belongs in the band's memory. A missing or malformed value just means no memory for this call.

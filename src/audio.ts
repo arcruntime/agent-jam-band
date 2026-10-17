@@ -94,8 +94,8 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
 };
 
 export interface Rig {
-  /** Configure every synth and effect for a preset. Call after the transport bpm is set, because the delay time follows the tempo. */
-  applyPreset(preset: SoundPreset): Promise<void>;
+  /** Configure every synth and effect for a preset. The delay time follows the tempo: pass the bpm when the transport is about to change (live steering), otherwise the transport's current bpm is used. Everything is applied at once; only the reverb tail regenerates afterwards. */
+  applyPreset(preset: SoundPreset, bpm?: number): Promise<void>;
   /** Trigger everything that sounds on one step, at audio time `time`. */
   play(ev: StepEvents, time: number): void;
   /** Cut off anything still ringing (Stop). */
@@ -204,7 +204,7 @@ export function createRig(): Rig {
       return current;
     },
 
-    async applyPreset(preset) {
+    async applyPreset(preset, bpm) {
       const p = PRESETS[preset];
       current = preset;
       settings = p;
@@ -240,11 +240,6 @@ export function createRig(): Rig {
       // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
       keysSend.gain.value = p.keys.reverbWet;
       melodySend.gain.value = p.melody.reverbSend;
-      if (reverb.decay !== p.keys.reverbDecay) {
-        reverb.decay = p.keys.reverbDecay; // regenerates the impulse response...
-        await reverb.ready; // ...which takes a moment
-      }
-
       const transport = Tone.getTransport();
       transport.swing = p.swing;
       transport.swingSubdivision = '16n';
@@ -257,9 +252,15 @@ export function createRig(): Rig {
       melodyFilter.frequency.value = p.melody.lowpass;
       vibrato.frequency.value = p.melody.vibratoHz;
       vibrato.depth.value = p.melody.vibratoDepth;
-      delay.delayTime.value = Tone.Time('8n').toSeconds(); // an eighth note at the current bpm
+      delay.delayTime.value = bpm ? 30 / bpm : Tone.Time('8n').toSeconds(); // an eighth note
       delay.feedback.value = p.melody.delayFeedback;
       delay.wet.value = p.melody.delayWet;
+
+      // Last, because it is the only slow part: the new decay regenerates the impulse response.
+      if (reverb.decay !== p.keys.reverbDecay) {
+        reverb.decay = p.keys.reverbDecay;
+        await reverb.ready;
+      }
     },
 
     play(ev, time) {

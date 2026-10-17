@@ -20,6 +20,7 @@ export interface EchoEvent {
 const PULSE_MS = 1600;
 const STRUCTURE = 'rgba(139, 143, 163, 0.16)';
 const ECHO = '#ffffff';
+const STEER = '#ff5fa2';
 
 const idOf = (end: string | GNode) => (typeof end === 'string' ? end : end.id);
 
@@ -28,6 +29,7 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 export function createGraphPanel(host: HTMLElement, colors: Record<string, string>) {
   const nodes = new Map<string, GNode>();
   const seenEchoes = new Set<string>();
+  const seenSteers = new Set<string>();
   const pulses = new Map<string, { start: number; strength: number }>();
   let involved = new Set<string>();
   let signature = '';
@@ -41,17 +43,19 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
     .nodeId('id')
     .nodeLabel((n) => {
       const node = n as GNode;
+      if (node.type === 'steer') return `<b>Steer${node.block ? ` · block ${node.block}` : ''}</b><br>${escapeHtml(node.summary ?? node.label)}`;
       if (node.type === 'motif') return `<b>${escapeHtml(node.agent ?? '')} · block ${node.block ?? ''}</b><br>${escapeHtml(node.summary ?? '')}`;
       return escapeHtml(node.label);
     })
     .linkColor((l) => {
       const link = l as GLink;
       if (link.type === 'ECHOES') return ECHO;
+      if (link.type === 'CHANGED') return STEER + 'cc';
       if (link.type === 'LOCKS_TO') return (nodes.get(idOf(link.source)) && colorOf(nodes.get(idOf(link.source))!)) + '99';
       return STRUCTURE;
     })
-    .linkWidth((l) => ((l as GLink).type === 'ECHOES' ? 2.6 : (l as GLink).type === 'LOCKS_TO' ? 1.3 : 0.6))
-    .linkLineDash((l) => ((l as GLink).type === 'LOCKS_TO' ? [4, 3] : null))
+    .linkWidth((l) => ((l as GLink).type === 'ECHOES' ? 2.6 : (l as GLink).type === 'LOCKS_TO' || (l as GLink).type === 'CHANGED' ? 1.3 : 0.6))
+    .linkLineDash((l) => ((l as GLink).type === 'LOCKS_TO' || (l as GLink).type === 'CHANGED' ? [4, 3] : null))
     .linkDirectionalParticles((l) => ((l as GLink).type === 'ECHOES' ? 3 : 0))
     .linkDirectionalParticleWidth(2.6)
     .linkDirectionalParticleSpeed(0.012)
@@ -69,11 +73,11 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
   graph.d3Force('charge')?.strength(-42);
   graph
     .d3Force('link')
-    ?.distance((l: GLink) => ({ ECHOES: 90, PLAYED: 62, IN_BLOCK: 22, IN_SESSION: 34, LOCKS_TO: 24 })[l.type] ?? 40)
+    ?.distance((l: GLink) => ({ ECHOES: 90, PLAYED: 62, IN_BLOCK: 22, IN_SESSION: 34, LOCKS_TO: 24, CHANGED: 70 })[l.type] ?? 40)
     .strength?.(0.5);
 
   function radius(n: GNode) {
-    return n.type === 'agent' ? 9 : n.type === 'motif' ? 6 : n.type === 'session' ? 4 : 3;
+    return n.type === 'agent' ? 9 : n.type === 'steer' ? 8 : n.type === 'motif' ? 6 : n.type === 'session' ? 4 : 3;
   }
 
   function paint(n: GNode, ctx: CanvasRenderingContext2D, scale: number) {
@@ -91,6 +95,25 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
         ctx.lineWidth = 2.5 * (1 - t) + 0.5;
         ctx.stroke();
       }
+    }
+    if (n.type === 'steer') {
+      // A diamond in its own colour, so a steer never reads as a motif.
+      ctx.beginPath();
+      ctx.moveTo(x, y - r - 2);
+      ctx.lineTo(x + r + 2, y);
+      ctx.lineTo(x, y + r + 2);
+      ctx.lineTo(x - r - 2, y);
+      ctx.closePath();
+      ctx.fillStyle = STEER;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(14,15,19,0.9)';
+      ctx.stroke();
+      ctx.font = `${10 / scale}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = STEER;
+      ctx.fillText(n.label, x, y + r + 12 / scale);
+      return;
     }
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -163,6 +186,12 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
         events.push({ from, to, reason: l.reason });
       }
 
+      for (const n of nodes.values()) {
+        if (n.type !== 'steer' || seenSteers.has(n.id)) continue;
+        seenSteers.add(n.id);
+        pulse(n.id, 1);
+      }
+
       const next = `${nodes.size}/${links.length}`;
       if (next !== signature) {
         signature = next;
@@ -175,6 +204,7 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
     clear() {
       nodes.clear();
       seenEchoes.clear();
+      seenSteers.clear();
       pulses.clear();
       involved = new Set();
       signature = '';

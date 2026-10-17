@@ -2,17 +2,19 @@ import { jsonrepair } from 'jsonrepair';
 import type OpenAI from 'openai';
 import type { z } from 'zod';
 import { meterOf, type Meter } from '../shared/meter.js';
-import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, DrumBar, JamState, MelodyBar } from '../shared/types.js';
+import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar } from '../shared/types.js';
 import { config } from './config.js';
 import {
   defaultBass,
   defaultConductor,
+  explicitMeter,
   defaultDrums,
   defaultKeys,
   defaultMelody,
   lockBassToKick,
   normalizePreset,
   presetFromVibe,
+  steerFallback,
   previousBass,
   previousDrums,
   previousKeys,
@@ -55,6 +57,9 @@ const NOTE_VELOCITY =
 const drumsVelocity = (steps: number) =>
   `Dynamics: a bar may carry an optional "velocity" object with any of "kick", "snare" and "hat", each an array of exactly ${steps} numbers from 0 to 1 giving the strength of the hit on that step (steps with a 0 in the hit row are ignored, and a row you leave out plays at the default 0.8). Accent beats 1 and 3, keep backbeat snares strong, and play ghost hats and ghost snares at about 0.3 to 0.5.`;
 
+const STEER_PARAGRAPH =
+  'Live steering: if the song object has "listener_steer", the listener changed the direction while the band was playing. Follow its "direction" (the conductor\'s instruction to the band) and its "text" from this phrase on; they override the vibe wherever the two conflict. Bars you are shown from before the change may be left out because they used a different meter.';
+
 const JSON_ONLY = 'Reply with ONLY a JSON object, with no prose, no comments and no markdown fences, in exactly this shape:';
 
 const drumsSystem = (m: Meter) =>
@@ -63,6 +68,7 @@ const drumsSystem = (m: Meter) =>
     `${gridParagraph(m)} Develop the groove and vary it a little from phrase to phrase; a small fill in bar 4 is welcome. Let the kick and snare follow the meter's grouping rather than forcing a 4/4 backbeat onto it.`,
     `The bassist locks to your kick, and the keys and melody players read your bars too, so make the kick pattern deliberate and keep at least one kick in every bar.`,
     MEMORY_PARAGRAPH,
+    STEER_PARAGRAPH,
     drumsVelocity(m.stepsPerBar),
     `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you played and why>", ${ECHO_SHAPE}, "bars": [{"kick": [${m.stepsPerBar} values], "snare": [${m.stepsPerBar} values], "hat": [${m.stepsPerBar} values]}, {...}, {...}, {...}]}`,
     `Rules: "bars" has exactly 4 objects. Each of kick, snare and hat is an array of exactly ${m.stepsPerBar} integers, each 0 (silent) or 1 (hit), with at most 16 hits per instrument per bar (kick, snare and hat are each limited to 16, separately). Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
@@ -74,6 +80,7 @@ const bassSystem = (m: Meter) =>
     gridParagraph(m),
     `You are given the drummer's NEXT 4 BARS. Read them first and lock to the kick: in every bar that has a kick, you MUST play a note on the step of the first kick hit, and most of your other notes should land on kick steps or answer the gaps between kicks as syncopated pickups. Leave space where the drums are busy.`,
     MEMORY_PARAGRAPH,
+    STEER_PARAGRAPH,
     NOTE_VELOCITY,
     `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how you locked to the drums and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "note": "A2", "dur": "8n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar, each with at least one note. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic, one note per step). note is scientific pitch notation such as "A1", "C#2" or "Eb2", in the range E1 to E3. Stay in the key (mostly root, fifth and octave, with the occasional passing tone). dur is one of ${DUR_LIST} ("1m" holds for a whole bar) and should not run past the end of the bar. Use at most 16 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
@@ -85,6 +92,7 @@ const keysSystem = (m: Meter) =>
     gridParagraph(m),
     `You are given the drummer's and the bassist's NEXT 4 BARS. Read both first. Build your chords on the bass: the chord sounding at each step should include the note the bassist is playing there (or its most recent note), or be a sensible chord over it, so keys and bass never clash. Comp against the drums: place chord hits on kick or snare steps or on the meter's group starts, and leave space; long sustained chords are fine ("1m" holds a whole bar). Keep voicings above the bass, mostly between octave 3 and octave 5.`,
     MEMORY_PARAGRAPH,
+    STEER_PARAGRAPH,
     NOTE_VELOCITY,
     `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what chords you chose and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "notes": ["A3", "C4", "E4"], "dur": "2n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar, each with 1 to 6 chord hits. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending. notes is 2 to 5 distinct pitches in scientific pitch notation such as "A3", "C#4" or "Eb4", all in octaves 2 to 5. dur is one of ${DUR_LIST}. Use at most 6 chord hits per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
@@ -96,6 +104,7 @@ const melodySystem = (m: Meter) =>
     gridParagraph(m),
     `You are given the drummer's, the bassist's and the keys player's NEXT 4 BARS. Read all three first. Write a singable lead line in the key: put chord tones from the keys part on the downbeat and on the meter's group starts, use passing tones between them, repeat a short motif and vary it, and leave rests (an empty array is a rest bar) so the part breathes. Play single notes only.`,
     MEMORY_PARAGRAPH,
+    STEER_PARAGRAPH,
     NOTE_VELOCITY,
     `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how the melody fits the chords and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "note": "E5", "dur": "4n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar; a bar may be empty but there must be at least 3 notes across the 4 bars. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic). note is scientific pitch notation such as "E5" or "F#4", in octaves 4 to 6 (C4 to C6). dur is one of ${DUR_LIST}. Use at most 12 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
@@ -108,6 +117,13 @@ const CONDUCTOR_SYSTEM = [
   `Also pick the sound preset that matches the genre, one of "lofi" (lo-fi, chill, jazzy, bossa nova, boom bap), "futurebass" (future bass, EDM, trap, dubstep, synth pop), "house" (house, techno, disco, dance), "rock" (rock, punk, metal, indie, funk, blues) or "ambient" (ambient, cinematic, drone, new age).`,
   `If the request includes "fixed_by_user", those values were chosen by the listener: return them exactly as given and choose everything else to suit them.`,
   `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of lofi, futurebass, house, rock, ambient>", "why": "<one short sentence, at most 20 words, naming the genre or feel and why you chose this tempo, key and meter>"}`,
+].join('\n\n');
+
+const STEER_SYSTEM = [
+  `You are the CONDUCTOR of ${BAND}. The band is already playing. The listener types a short steering instruction, sometimes just a word or a button label such as "7/8", "5/4", "half-time", "drop", "darker" or "genre: jazz", and you return the updated settings for the next phrase.`,
+  `You are given the "current" settings and the instruction. Change only what the instruction asks for and keep everything else as in "current". A meter such as "7/8" or "waltz" changes the time signature (and nudges nothing else unless needed). "half-time" means a half-time feel: keep the bpm, and tell the drummer to put the snare on beat three and thin out the hats. "drop" means the full-energy moment: keep the tempo and meter, choose the most energetic preset that suits the genre, and tell drums and bass to hit hard with a heavy kick and sub bass and the keys to stab. "darker" means a darker mood: move the key toward minor (or phrygian if it is already minor), take a little off the tempo, and tell the band for lower voicings and more space. "genre: X" or any genre name means switch to that genre: pick a genre-appropriate bpm, key, meter and preset. Anything else, use your judgement as a bandleader.`,
+  `Reference BPMs: ambient 60-80, reggae 70-90, lo-fi hip hop 80-90, boom bap 85-95, jazz 100-140, disco 115-125, house 120-128, bossa nova 120-140, techno 125-135, trap 130-150, dubstep 138-142, future bass 140-150, drum and bass 170-176. The time signature is one of "4/4", "3/4", "5/4", "7/8", "6/8". The preset is one of "lofi" (lo-fi, chill, jazzy, bossa nova, boom bap), "futurebass" (future bass, EDM, trap, dubstep, synth pop), "house" (house, techno, disco, dance), "rock" (rock, punk, metal, indie, funk, blues) or "ambient" (ambient, cinematic, drone, new age).`,
+  `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of lofi, futurebass, house, rock, ambient>", "why": "<one short sentence, at most 20 words, spoken by you to the band, naming the change and giving each player a hint, for example: Switching to 7/8: drums, think odd grouping 2+2+3.>"}`,
 ].join('\n\n');
 
 // ---------- Running one agent ----------
@@ -245,6 +261,7 @@ function song(state: JamState, m: Meter) {
     steps_per_bar: m.stepsPerBar,
     group_start_steps: m.accentSteps,
     vibe: state.vibe,
+    ...(state.steer ? { listener_steer: { text: state.steer.text, direction: state.steer.direction } } : {}),
   };
 }
 
@@ -252,7 +269,9 @@ const stepsOf = (row: number[]) => row.flatMap((v, i) => (v ? [i] : []));
 
 /** Finished bars of one part from the shared state, newest last. The drummer may be writing ahead, so later parts can still be null. */
 function history<K extends 'drums' | 'bass' | 'keys' | 'melody'>(state: JamState, part: K) {
-  return state.bars.flatMap((b) => (b[part] ? [b[part]] : [])).slice(-CONTEXT_BARS);
+  // Bars from another meter have a different step grid, so they are left out after a live meter change.
+  const sameMeter = state.bars.filter((b) => !b.timeSignature || b.timeSignature === state.timeSignature);
+  return sameMeter.flatMap((b) => (b[part] ? [b[part]] : [])).slice(-CONTEXT_BARS);
 }
 
 const drumsView = (drums: DrumBar[]) =>
@@ -288,6 +307,25 @@ export async function conductorAgent(vibe: string, overrides: ConductorOverrides
 }
 
 const recallFor = (ctx: Ctx, agent: MemoryAgent): Promise<BandMemoryItem[]> => (ctx ? recall(ctx, agent) : Promise.resolve([]));
+
+/**
+ * Live steering: the same conductor, asked to update the settings of a band that is already playing.
+ * A meter the listener names outright always wins. If the model fails twice, obvious requests are applied directly (see steerFallback) and anything else changes nothing (empty why).
+ */
+export async function conductorSteerAgent(vibe: string, current: ConductorSettings, text: string): Promise<ConductorReply> {
+  const started = Date.now();
+  const user = JSON.stringify({ vibe, current, steer: text, task: 'Apply the listener steering instruction to the current settings.' });
+  try {
+    const { data, latencyMs } = await runAgent('conductor-steer', STEER_SYSTEM, user, conductorReplySchema, 'low');
+    const timeSignature = explicitMeter(text) ?? data.timeSignature;
+    const preset = normalizePreset(data.preset) ?? current.preset;
+    return { bpm: data.bpm, key: data.key, timeSignature, preset, why: data.why, latencyMs };
+  } catch (err) {
+    const fb = steerFallback(text, current);
+    console.error(`[conductor-steer] FALLBACK (${fb.why ? 'rules' : 'no change'}) because: ${(err as Error).message}`);
+    return { ...fb, latencyMs: Date.now() - started, fallback: true };
+  }
+}
 
 export async function drumsAgent(state: JamState, ctx?: Ctx): Promise<AgentReply<DrumBar>> {
   const m = meterOf(state.timeSignature);

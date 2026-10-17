@@ -32,6 +32,10 @@ const LOCKS: Partial<Record<MemoryAgent, MemoryAgent>> = { bass: 'drums', keys: 
 
 export const motifId = (sessionId: string, block: number, agent: string) => `${sessionId}:${block}:${agent}`;
 
+/** Blocks the listener steered away from before they played. A late write for one of these is dropped, and what was already written is deleted. Block numbers are never reused, so this is safe. */
+const discarded = new Map<string, Set<number>>();
+const isDiscarded = (sid: string, block: number) => discarded.get(sid)?.has(block) === true;
+
 const RECALL_TIMEOUT_MS = 1500;
 const FLUSH_TIMEOUT_MS = 2000;
 const MAX_SUMMARY = 240;
@@ -108,8 +112,9 @@ export function remember(ctx: MemoryCtx, agent: MemoryAgent, motif: { bars: unkn
     echoId: motif.echoes?.id ?? null,
     reason: motif.echoes?.reason ?? null,
   };
-  enqueue(`${agent} motif`, () =>
-    query(
+  enqueue(`${agent} motif`, () => {
+    if (isDiscarded(ctx.sessionId, ctx.block)) return Promise.resolve();
+    return query(
       'write',
       `MERGE (s:Session {id: $sid})
        MERGE (b:Block {index: toInteger($block)})-[:IN_SESSION]->(s)
@@ -126,6 +131,45 @@ export function remember(ctx: MemoryCtx, agent: MemoryAgent, motif: { bars: unkn
        OPTIONAL MATCH (target:Motif {id: $echoId})-[:IN_BLOCK]->(:Block)-[:IN_SESSION]->(s)
        FOREACH (y IN CASE WHEN target IS NULL OR target = m THEN [] ELSE [1] END | MERGE (m)-[r:ECHOES]->(target) SET r.reason = $reason)`,
       params,
+    );
+  });
+}
+
+/** Blocks that were generated for the old direction and will never play: forget them, so the graph and band memory only hold music that was (or will be) heard. */
+export function discardBlocks(sessionId: string, blocks: number[]) {
+  const fresh = blocks.filter((n) => !isDiscarded(sessionId, n));
+  if (!fresh.length) return;
+  const set = discarded.get(sessionId) ?? new Set<number>();
+  for (const n of fresh) set.add(n);
+  discarded.set(sessionId, set);
+  enqueue('discard', () =>
+    query(
+      'write',
+      `MATCH (b:Block)-[:IN_SESSION]->(:Session {id: $sid})
+       WHERE b.index IN $blocks
+       OPTIONAL MATCH (m:Motif)-[:IN_BLOCK]->(b)
+       DETACH DELETE m, b`,
+      { sid: sessionId, blocks: fresh },
+    ),
+  );
+}
+
+/** A live steer: (:Steer {text})-[:CHANGED]->(:Session), and the session now carries the new settings. */
+export function rememberSteer(
+  sessionId: string,
+  steer: { id: string; text: string; atBlock: number; why: string },
+  settings: { bpm: number; key: string; timeSignature: string; preset: string },
+) {
+  enqueue('steer', () =>
+    query(
+      'write',
+      `MERGE (s:Session {id: $sid})
+       MERGE (t:Steer {id: $id})
+         ON CREATE SET t.createdAt = timestamp()
+         SET t.text = $text, t.atBlock = toInteger($atBlock), t.why = $why, t.bpm = toInteger($bpm), t.key = $key, t.timeSignature = $ts, t.preset = $preset
+       MERGE (t)-[:CHANGED]->(s)
+       SET s.bpm = toInteger($bpm), s.key = $key, s.timeSignature = $ts, s.preset = $preset`,
+      { sid: sessionId, id: `${sessionId}:steer:${steer.id}`, text: steer.text, atBlock: steer.atBlock, why: steer.why, bpm: settings.bpm, key: settings.key, ts: settings.timeSignature, preset: settings.preset },
     ),
   );
 }
@@ -137,6 +181,7 @@ export function ensureSchema() {
       'CREATE CONSTRAINT session_id IF NOT EXISTS FOR (s:Session) REQUIRE s.id IS UNIQUE',
       'CREATE CONSTRAINT motif_id IF NOT EXISTS FOR (m:Motif) REQUIRE m.id IS UNIQUE',
       'CREATE CONSTRAINT agent_name IF NOT EXISTS FOR (a:Agent) REQUIRE a.name IS UNIQUE',
+      'CREATE CONSTRAINT steer_id IF NOT EXISTS FOR (t:Steer) REQUIRE t.id IS UNIQUE',
     ]) {
       await query('write', q);
     }
@@ -173,7 +218,7 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
   try {
     await flush();
     const p = { sid: sessionId };
-    const [sessionRows, blockRows, motifRows, playedRows, relRows] = await Promise.all([
+    const [sessionRows, blockRows, motifRows, playedRows, relRows, steerRows] = await Promise.all([
       query('read', 'MATCH (s:Session {id: $sid}) RETURN s.vibe AS vibe', p),
       query('read', 'MATCH (b:Block)-[:IN_SESSION]->(:Session {id: $sid}) RETURN b.index AS index ORDER BY b.index', p),
       query(
@@ -190,8 +235,9 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
          RETURN m.id AS source, t.id AS target, type(r) AS type, r.reason AS reason`,
         p,
       ),
+      query('read', 'MATCH (t:Steer)-[:CHANGED]->(:Session {id: $sid}) RETURN t.id AS id, t.text AS text, t.why AS why, t.atBlock AS atBlock ORDER BY t.createdAt', p),
     ]);
-    if (!sessionRows || !blockRows || !motifRows || !playedRows || !relRows) return empty;
+    if (!sessionRows || !blockRows || !motifRows || !playedRows || !relRows || !steerRows) return empty;
 
     const nodes: GraphNode[] = [];
     const links: GraphLink[] = [];
@@ -213,6 +259,12 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
     }
     for (const agent of MEMORY_AGENTS) if (agents.has(agent)) nodes.push({ id: `agent:${agent}`, type: 'agent', label: agent, agent });
     for (const r of playedRows) links.push({ source: `agent:${String(r.get('agent'))}`, target: String(r.get('motif')), type: 'PLAYED' });
+    for (const r of steerRows) {
+      const text = String(r.get('text') ?? '');
+      const id = String(r.get('id'));
+      nodes.push({ id, type: 'steer', label: text.length > 24 ? `${text.slice(0, 23)}…` : text, summary: [text, r.get('why')].filter(Boolean).join(' — '), block: toNum(r.get('atBlock')) });
+      links.push({ source: id, target: sessionNode, type: 'CHANGED' });
+    }
     for (const r of relRows) {
       const reason = r.get('reason');
       links.push({ source: String(r.get('source')), target: String(r.get('target')), type: r.get('type') as GraphLink['type'], ...(reason ? { reason: String(reason) } : {}) });

@@ -48,6 +48,10 @@ export class Pipeline<P> {
   private readonly queues: Job<P>[][];
   private readonly working: (Job<P> | null)[];
   private nextN = 1;
+  /** The highest block number any job ever got, so numbers are never reused after a reset */
+  private highest = 0;
+  /** Bumped by reset(): work that started in an earlier epoch is dropped when it finishes */
+  private epoch = 0;
   private failures = 0;
   private stopped = false;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,6 +80,27 @@ export class Pipeline<P> {
     const block = this.ready.shift();
     this.pump();
     return block;
+  }
+
+  /**
+   * Throw away everything that has not been played: finished blocks, queued jobs and jobs being written. Used by live steering, where the buffered blocks were written for the old direction.
+   * Returns the numbers of the discarded blocks. Work still in flight is ignored when it finishes (the caller should abort its requests too). New blocks get fresh, higher numbers, so the numbers skip.
+   * Call start() afterwards to begin writing for the new direction.
+   */
+  reset(): number[] {
+    const dropped = new Set<number>();
+    for (const b of this.ready) dropped.add(b.n);
+    for (const q of this.queues) for (const j of q) dropped.add(j.n);
+    for (const j of this.working) if (j) dropped.add(j.n);
+    this.ready.length = 0;
+    this.working.fill(null); // stale jobs finish on their own and are ignored; the slots are free for new work now
+    for (const q of this.queues) q.length = 0;
+    this.epoch += 1;
+    this.nextN = this.highest + 1;
+    this.failures = 0;
+    clearTimeout(this.retryTimer);
+    this.opts.onChange?.();
+    return [...dropped].sort((a, b) => a - b);
   }
 
   status(): PipelineStatus {
@@ -111,11 +136,13 @@ export class Pipeline<P> {
 
   private async run(k: number, job: Job<P>) {
     const stage = this.opts.stages[k];
+    const epoch = this.epoch;
+    this.highest = Math.max(this.highest, job.n);
     this.working[k] = job;
     let ok = false;
     try {
       const part = await stage.write(job.n, { ...job.parts });
-      if (this.stopped) return;
+      if (this.stopped || epoch !== this.epoch) return;
       job.parts[stage.name] = part as P[keyof P & string];
       if (k === 0) this.nextN = job.n + 1;
       if (k === this.opts.stages.length - 1) {
@@ -130,12 +157,13 @@ export class Pipeline<P> {
         ok = true;
       }
     } catch (err) {
-      if (this.stopped) return;
+      if (this.stopped || epoch !== this.epoch) return; // stale work that was aborted by a reset is not a failure
       if (k > 0) this.queues[k].unshift(job); // keep the earlier parts and retry this stage
       this.fail(stage.name, job.n, err);
     } finally {
-      this.working[k] = null;
+      if (this.working[k] === job) this.working[k] = null; // after a reset the slot may already belong to a newer job
     }
+    if (epoch !== this.epoch) return;
     if (ok) this.pump();
     else this.opts.onChange?.();
   }

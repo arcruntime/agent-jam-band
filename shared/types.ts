@@ -44,6 +44,8 @@ export type MelodyBar = MelodyNote[];
 export interface JamBar {
   /** The key this bar was written in, so a reused bar can be transposed if the key changes */
   key?: string;
+  /** The meter this bar was written in. Bars from another meter are not shown to the agents and never reused, because their step grid has a different length. */
+  timeSignature?: TimeSignature;
   drums: DrumBar;
   bass: BassBar | null;
   keys: ChordBar | null;
@@ -57,6 +59,8 @@ export interface JamState {
   timeSignature: TimeSignature;
   vibe: string;
   bars: JamBar[];
+  /** The listener's latest live steer and the conductor's direction for the band. It overrides the vibe wherever the two conflict. */
+  steer?: { text: string; direction: string };
 }
 
 /** What each musician returns: a one-line note plus 4 bars. */
@@ -79,6 +83,14 @@ export interface BlockParts {
   melody: MelodyBar[];
 }
 
+/** The four things the conductor decides, and what a live steer changes. */
+export interface ConductorSettings {
+  bpm: number;
+  key: string;
+  timeSignature: TimeSignature;
+  preset: SoundPreset;
+}
+
 export interface ConductorOverrides {
   bpm?: number;
   timeSignature?: TimeSignature;
@@ -97,7 +109,7 @@ export interface ConductorReply {
 
 // ---------- Band memory (Neo4j) ----------
 
-export type GraphNodeType = 'session' | 'block' | 'agent' | 'motif';
+export type GraphNodeType = 'session' | 'block' | 'agent' | 'motif' | 'steer';
 
 export interface GraphNode {
   id: string;
@@ -110,7 +122,7 @@ export interface GraphNode {
   summary?: string;
 }
 
-export type GraphLinkType = 'IN_SESSION' | 'IN_BLOCK' | 'PLAYED' | 'ECHOES' | 'LOCKS_TO';
+export type GraphLinkType = 'IN_SESSION' | 'IN_BLOCK' | 'PLAYED' | 'ECHOES' | 'LOCKS_TO' | 'CHANGED';
 
 export interface GraphLink {
   source: string;

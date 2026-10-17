@@ -7,6 +7,7 @@ import type {
   ChordBar,
   ConductorOverrides,
   ConductorReply,
+  ConductorSettings,
   DrumBar,
   GraphPayload,
   JamState,
@@ -30,8 +31,11 @@ const STATE_TAIL_BARS = 16;
 /** Four bars written together by the band. */
 type Chunk = Block<BlockParts>;
 type PartName = keyof BlockParts;
-type Who = 'conductor' | PartName | 'system';
+type Who = 'conductor' | PartName | 'system' | 'steer';
 type Mode = 'idle' | 'loading' | 'playing';
+
+/** Quick steers: the label is also the text sent to the conductor. */
+const QUICK_STEERS = ['7/8', '5/4', 'half-time', 'drop', 'darker', 'genre: jazz'];
 
 /** Everything that belongs to one Start..Stop run. Replaced on every Start so stale async work can detect it was cancelled. */
 interface Session {
@@ -47,6 +51,21 @@ interface Session {
   step: number;
   bar: number;
   loopWarned: boolean;
+  /** What is sounding right now */
+  active: ConductorSettings;
+  /** What the band is writing for: the latest steer, which may not be playing yet */
+  target: ConductorSettings;
+  /** A steer that waits for the next block boundary (the first block written after it) */
+  pending: ConductorSettings | null;
+  /** Aborts the requests of discarded work when the listener steers */
+  abort: AbortController;
+  /** Bumped on every steer; replies from an older epoch are thrown away */
+  epoch: number;
+  /** Where each block's first bar sits in state.bars (block numbers skip after a steer, so this is not arithmetic) */
+  blockStart: Map<number, number>;
+  /** Step count at which the current meter began; bar positions are measured from here */
+  base: number;
+  steering: boolean;
   waitFirst?: { resolve: () => void; reject: (err: Error) => void };
 }
 
@@ -92,6 +111,17 @@ app.innerHTML = `
           <p id="now" class="now">Press Start to hear the band.</p>
           <p id="next" class="next"></p>
         </section>
+        <section class="panel steer-panel" id="steerPanel" hidden>
+          <h2>Steer the band</h2>
+          <form id="steerForm" class="steer-row" autocomplete="off">
+            <input id="steerText" type="text" maxlength="200" placeholder="Try: switch to 7/8, go darker, make it jazzier…" aria-label="Steer the band" />
+            <button id="steerBtn" type="submit">Steer</button>
+          </form>
+          <div class="steer-quick" id="steerQuick">
+            ${QUICK_STEERS.map((q) => `<button type="button" class="ghost" data-steer="${q}">${q}</button>`).join('')}
+          </div>
+          <p id="steerNote" class="steer-note"></p>
+        </section>
         <section class="panel chat">
           <h2>Band chat</h2>
           <ol id="log" aria-live="polite"></ol>
@@ -105,6 +135,7 @@ app.innerHTML = `
           <li><i style="background: var(--keys)"></i>Keys</li>
           <li><i style="background: var(--melody)"></i>Melody</li>
           <li><i class="echo"></i>Echo</li>
+          <li><i class="steer"></i>Steer</li>
         </ul>
         <div id="graphHost" class="graph-host"></div>
       </aside>
@@ -124,6 +155,12 @@ const metaBpmEl = document.querySelector<HTMLElement>('#metaBpm')!;
 const metaKeyEl = document.querySelector<HTMLElement>('#metaKey')!;
 const metaMeterEl = document.querySelector<HTMLElement>('#metaMeter')!;
 const metaSoundEl = document.querySelector<HTMLElement>('#metaSound')!;
+const steerPanel = document.querySelector<HTMLElement>('#steerPanel')!;
+const steerForm = document.querySelector<HTMLFormElement>('#steerForm')!;
+const steerText = document.querySelector<HTMLInputElement>('#steerText')!;
+const steerBtn = document.querySelector<HTMLButtonElement>('#steerBtn')!;
+const steerQuick = document.querySelector<HTMLElement>('#steerQuick')!;
+const steerNote = document.querySelector<HTMLElement>('#steerNote')!;
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphHost')!, {
@@ -133,7 +170,7 @@ const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphH
   melody: cssVar('--melody'),
 });
 
-const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System' };
+const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System', steer: 'You' };
 
 function log(who: Who, text: string, tag?: string) {
   const li = document.createElement('li');
@@ -163,6 +200,12 @@ function setMode(mode: Mode) {
   bpmEl.disabled = mode !== 'idle';
   meterEl.disabled = mode !== 'idle';
   stopBtn.disabled = mode === 'idle';
+  steerPanel.hidden = mode !== 'playing';
+  if (mode !== 'playing') {
+    steerText.value = '';
+    steerNote.textContent = '';
+  }
+  setSteerBusy(false);
   if (mode === 'idle') {
     nowEl.textContent = 'Press Start to hear the band.';
     nextEl.textContent = '';
@@ -172,11 +215,17 @@ function setMode(mode: Mode) {
   }
 }
 
-function showSettings(state: JamState, preset: string) {
-  metaBpmEl.textContent = `${state.tempo} BPM`;
-  metaKeyEl.textContent = state.key;
-  metaMeterEl.textContent = state.timeSignature;
-  metaSoundEl.textContent = preset;
+function setSteerBusy(busy: boolean) {
+  steerBtn.disabled = busy;
+  steerText.disabled = busy;
+  for (const b of steerQuick.querySelectorAll('button')) b.disabled = busy;
+}
+
+function showSettings(c: ConductorSettings) {
+  metaBpmEl.textContent = `${c.bpm} BPM`;
+  metaKeyEl.textContent = c.key;
+  metaMeterEl.textContent = c.timeSignature;
+  metaSoundEl.textContent = c.preset;
 }
 
 const barsOf = (n: number) => `${(n - 1) * BARS_PER_CHUNK + 1}–${n * BARS_PER_CHUNK}`;
@@ -188,7 +237,8 @@ function renderStatus(s: Session) {
   const st = s.pipeline.status();
   const buffer = `Buffered ahead: ${st.ready * BARS_PER_CHUNK} of ${BUFFER_BLOCKS * BARS_PER_CHUNK} bars`;
   const busy = st.working.map((w) => `${w.stage} for bars ${barsOf(w.n)}`);
-  nextEl.textContent = busy.length ? `${buffer} · writing ${busy.join(', ')}` : buffer;
+  const lead = s.pending ? `Switching to ${s.pending.timeSignature} · ${s.pending.bpm} BPM · ${s.pending.preset} at the next block · ` : '';
+  nextEl.textContent = lead + (busy.length ? `${buffer} · writing ${busy.join(', ')}` : buffer);
 }
 
 /** Reads the BPM box and meter dropdown. A BPM outside 60-180 is clamped into range (and the box updated); anything that is not a number counts as Auto. */
@@ -210,8 +260,9 @@ function readOverrides(): ConductorOverrides {
 
 // ---------- Talking to the agents ----------
 
-async function post<T>(url: string, body: unknown): Promise<T> {
+async function post<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -223,14 +274,20 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** Index in the shared state of bar `i` (0-3) of block `n`. */
-const barIndex = (n: number, i: number) => (n - 1) * BARS_PER_CHUNK + i;
+/** Bar `i` (0-3) of block `n` in the shared state. Throws if the block was discarded by a steer. */
+function barOf(s: Session, n: number, i: number) {
+  const start = s.blockStart.get(n);
+  const bar = start === undefined ? undefined : s.state.bars[start + i];
+  if (!bar) throw new Error('stopped');
+  return bar;
+}
 
 /** One musician's turn: send the shared state plus the earlier parts, log its note, and record its bars in the shared state. */
 async function runStage<T>(s: Session, who: PartName, n: number, earlier: object, record: (bars: T[]) => void): Promise<T[]> {
   const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
-  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier, memory: { sessionId: s.id, block: n } });
-  if (session !== s) throw new Error('stopped');
+  const epoch = s.epoch;
+  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier, memory: { sessionId: s.id, block: n } }, s.abort.signal);
+  if (session !== s || s.epoch !== epoch) throw new Error('stopped'); // stopped, or steered away from while this was being written
   if (reply.why) log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
   record(reply.bars);
   if (reply.echoed) void refreshGraph(s); // a new ECHOES edge is on its way into the graph
@@ -279,6 +336,7 @@ async function refreshGraph(s: Session) {
 // ---------- Transport ----------
 
 const transport = Tone.getTransport();
+const DEFAULT_SETTINGS: ConductorSettings = { bpm: 90, key: 'A minor', timeSignature: '4/4', preset: 'lofi' };
 let session: Session | null = null;
 
 /** A fresh id for each Start..Stop run (letters, digits, dashes). */
@@ -297,6 +355,14 @@ function newSession(vibe: string): Session {
     step: 0,
     bar: 0,
     loopWarned: false,
+    active: { ...DEFAULT_SETTINGS },
+    target: { ...DEFAULT_SETTINGS },
+    pending: null,
+    abort: new AbortController(),
+    epoch: 0,
+    blockStart: new Map(),
+    base: 0,
+    steering: false,
     pipeline: new Pipeline<BlockParts>({
       bufferBlocks: BUFFER_BLOCKS,
 
@@ -306,28 +372,29 @@ function newSession(vibe: string): Session {
           name: 'drums',
           write: (n) =>
             runStage<DrumBar>(s, 'drums', n, {}, (bars) => {
-              for (const drums of bars) s.state.bars.push({ key: s.state.key, drums, bass: null, keys: null, melody: null });
+              s.blockStart.set(n, s.state.bars.length);
+              for (const drums of bars) s.state.bars.push({ key: s.state.key, timeSignature: s.state.timeSignature, drums, bass: null, keys: null, melody: null });
             }),
         },
         {
           name: 'bass',
           write: (n, up) =>
             runStage<BassBar>(s, 'bass', n, { drums: up.drums }, (bars) => {
-              bars.forEach((bass, i) => (s.state.bars[barIndex(n, i)].bass = bass));
+              bars.forEach((bass, i) => (barOf(s, n, i).bass = bass));
             }),
         },
         {
           name: 'keys',
           write: (n, up) =>
             runStage<ChordBar>(s, 'keys', n, { drums: up.drums, bass: up.bass }, (bars) => {
-              bars.forEach((keys, i) => (s.state.bars[barIndex(n, i)].keys = keys));
+              bars.forEach((keys, i) => (barOf(s, n, i).keys = keys));
             }),
         },
         {
           name: 'melody',
           write: (n, up) =>
             runStage<MelodyBar>(s, 'melody', n, { drums: up.drums, bass: up.bass, keys: up.keys }, (bars) => {
-              bars.forEach((melody, i) => (s.state.bars[barIndex(n, i)].melody = melody));
+              bars.forEach((melody, i) => (barOf(s, n, i).melody = melody));
             }),
         },
       ],
@@ -355,13 +422,19 @@ function newSession(vibe: string): Session {
 function tick(s: Session, time: number) {
   if (session !== s || !s.current) return;
   const chunkSteps = s.stepsPerBar * BARS_PER_CHUNK;
-  const pos = s.step % chunkSteps;
+  const rel = s.step - s.base;
+  let pos = rel % chunkSteps;
 
-  if (pos === 0 && s.step > 0) {
+  if (pos === 0 && rel > 0) {
     const next = s.pipeline.take(); // also kicks off generation for the freed buffer slot
     if (next) {
       s.current = next;
       s.loopWarned = false;
+      // A steer waits for exactly this moment: the first bar line where a block written for the new direction is ready.
+      if (s.pending) {
+        applyPending(s, time);
+        pos = 0;
+      }
     } else if (!s.loopWarned) {
       s.loopWarned = true;
       console.info('[client] the next bars are not ready yet; repeating the current four');
@@ -375,6 +448,86 @@ function tick(s: Session, time: number) {
 
   getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar, s.strong), time);
   s.step += 1;
+}
+
+/** Switches the sounding settings at a block boundary (called from tick, so `time` is the audio time of the first step of the new block). Never mid-bar. */
+function applyPending(s: Session, time: number) {
+  const p = s.pending;
+  if (!p) return;
+  s.pending = null;
+  const meter = meterOf(p.timeSignature);
+  transport.bpm.setValueAtTime(p.bpm, time); // exactly at the bar line, not "now"
+  transport.timeSignature = [meter.numerator, meter.denominator];
+  void getRig().applyPreset(p.preset, p.bpm);
+  s.stepsPerBar = meter.stepsPerBar;
+  s.strong = strongSteps(meter.accentSteps);
+  s.base = s.step;
+  s.active = p;
+  Tone.getDraw().schedule(() => {
+    if (session !== s) return;
+    showSettings(p);
+    steerNote.textContent = `Now playing ${p.timeSignature} · ${p.bpm} BPM · ${p.key} · ${p.preset}.`;
+    log('system', `Switched to ${p.timeSignature} · ${p.bpm} BPM · ${p.key} · ${p.preset}.`);
+    renderStatus(s);
+  }, time);
+}
+
+/** Throws away everything unplayed (it was written for the old direction) and cancels the requests still in flight. Returns the discarded block numbers. */
+function resetGeneration(s: Session): number[] {
+  s.abort.abort();
+  s.abort = new AbortController();
+  s.epoch += 1;
+  const dropped = s.pipeline.reset();
+  const starts = dropped.flatMap((n) => (s.blockStart.has(n) ? [s.blockStart.get(n)!] : []));
+  if (starts.length) s.state.bars.length = Math.min(s.state.bars.length, Math.min(...starts));
+  for (const n of dropped) s.blockStart.delete(n);
+  return dropped;
+}
+
+/** Live steering: ask the conductor, then change direction at the next block boundary. */
+async function steer(raw: string) {
+  const s = session;
+  const text = raw.trim().slice(0, 200);
+  if (!s || !s.current || s.steering || !text) return;
+  s.steering = true;
+  setSteerBusy(true);
+  steerText.value = '';
+  log('steer', text, `block ${s.current.n}`);
+  steerNote.textContent = 'The conductor is thinking…';
+  try {
+    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const out = await post<ConductorReply>('/api/agents/conductor', {
+      vibe: s.state.vibe,
+      sessionId: s.id,
+      steer: { id, text, atBlock: s.current.n, current: s.target },
+    });
+    if (session !== s) return;
+    if (!out.why) {
+      log('conductor', "Got it. We'll keep going as we are.", 'no change');
+      steerNote.textContent = '';
+      return;
+    }
+    const next: ConductorSettings = { bpm: Math.min(BPM_MAX, Math.max(BPM_MIN, Math.round(out.bpm))), key: out.key, timeSignature: out.timeSignature, preset: out.preset };
+    s.target = next;
+    s.state.tempo = next.bpm;
+    s.state.key = next.key;
+    s.state.timeSignature = next.timeSignature;
+    s.state.steer = { text, direction: out.why };
+    s.pending = next;
+    const dropped = resetGeneration(s);
+    s.pipeline.start(); // writes new blocks for the new direction
+    log('conductor', out.why, `steer · ${next.bpm} BPM · ${next.key} · ${next.timeSignature} · ${next.preset} · ${out.latencyMs} ms`);
+    steerNote.textContent = 'Changing at the next block boundary…';
+    renderStatus(s);
+    const done = dropped.length ? post('/api/memory/discard', { sessionId: s.id, blocks: dropped }).catch((e) => console.warn(`[client] discard failed: ${errMsg(e)}`)) : Promise.resolve();
+    void done.finally(() => refreshGraph(s));
+  } catch (err) {
+    console.warn(`[client] steer failed: ${errMsg(err)}`);
+    steerNote.textContent = '';
+  } finally {
+    s.steering = false;
+    if (session === s) setSteerBusy(false);
+  }
 }
 
 function logConductor(c: ConductorReply, o: ConductorOverrides) {
@@ -409,7 +562,8 @@ async function start() {
     const meter = meterOf(c.timeSignature);
     s.stepsPerBar = meter.stepsPerBar;
     s.strong = strongSteps(meter.accentSteps);
-    showSettings(s.state, c.preset);
+    s.active = s.target = { bpm: c.bpm, key: c.key, timeSignature: c.timeSignature, preset: c.preset };
+    showSettings(s.active);
     logConductor(c, overrides);
 
     // Tempo first: the delay time in the sound preset follows the bpm.
@@ -450,6 +604,7 @@ function stop() {
   const s = session;
   session = null;
   s.pipeline.stop();
+  s.abort.abort();
   s.waitFirst?.reject(new Error('stopped'));
   transport.stop();
   transport.cancel(0);
@@ -458,6 +613,14 @@ function stop() {
   log('system', 'Stopped.');
 }
 
+steerForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  void steer(steerText.value);
+});
+steerQuick.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-steer]');
+  if (btn) void steer(btn.dataset.steer ?? '');
+});
 startBtn.addEventListener('click', () => void start());
 stopBtn.addEventListener('click', stop);
 for (const el of [vibeEl, bpmEl]) {

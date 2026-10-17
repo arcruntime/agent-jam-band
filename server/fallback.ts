@@ -2,9 +2,9 @@
  * What the band plays when an agent fails twice: its own previous block (transposed if the key moved), or a plain built-in pattern if there is no previous block yet.
  * Nothing here is ever shown in the UI; the callers log to the server console only.
  */
-import type { Meter } from '../shared/meter.js';
+import { TIME_SIGNATURES, type Meter, type TimeSignature } from '../shared/meter.js';
 import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
-import type { BassBar, ChordBar, ConductorOverrides, DrumBar, JamBar, JamState, MelodyBar } from '../shared/types.js';
+import type { BassBar, ChordBar, ConductorOverrides, ConductorSettings, DrumBar, JamBar, JamState, MelodyBar } from '../shared/types.js';
 
 // ---------- Pitch helpers ----------
 
@@ -61,7 +61,8 @@ const transposeMelody = (bar: MelodyBar, shift: number): MelodyBar =>
 
 /** The last four finished bars of one part, each with the bar it came from. Null if fewer than four exist. */
 function lastFour<T>(state: JamState, pick: (b: JamBar) => T | null): { value: T; bar: JamBar }[] | null {
-  const found = state.bars.flatMap((bar) => {
+  // Only bars written in the current meter qualify: after a live meter change the older bars have a different step grid.
+  const found = state.bars.filter((b) => !b.timeSignature || b.timeSignature === state.timeSignature).flatMap((bar) => {
     const value = pick(bar);
     return value ? [{ value, bar }] : [];
   });
@@ -130,13 +131,19 @@ const GENRE_DEFAULTS: Record<SoundPreset, { bpm: number; key: string }> = {
   ambient: { bpm: 70, key: 'D minor' },
 };
 
+/** The sound preset a piece of text names (a genre or a mood), or null when it names none. */
+export function matchPreset(text: string): SoundPreset | null {
+  if (/future\s*bass|dubstep|trap|\bedm\b|synthwave|hyperpop|electro|festival/i.test(text)) return 'futurebass';
+  if (/house|techno|disco|dance|club|garage|trance/i.test(text)) return 'house';
+  if (/rock|punk|metal|grunge|indie|funk|blues|guitar/i.test(text)) return 'rock';
+  if (/ambient|drone|cinematic|new age|sleep|meditat|space|drift/i.test(text)) return 'ambient';
+  if (/lo-?fi|jazz|bossa|chill|hip.?hop|boom bap|soul|study/i.test(text)) return 'lofi';
+  return null;
+}
+
 /** Best-guess sound preset from the vibe text. Lo-fi when nothing matches. */
 export function presetFromVibe(vibe: string): SoundPreset {
-  if (/future\s*bass|dubstep|trap|\bedm\b|synthwave|hyperpop|electro|festival/i.test(vibe)) return 'futurebass';
-  if (/house|techno|disco|dance|club|garage|trance/i.test(vibe)) return 'house';
-  if (/rock|punk|metal|grunge|indie|funk|blues|guitar/i.test(vibe)) return 'rock';
-  if (/ambient|drone|cinematic|new age|sleep|meditat|space|drift/i.test(vibe)) return 'ambient';
-  return 'lofi';
+  return matchPreset(vibe) ?? 'lofi';
 }
 
 /** Accepts "lofi", "Lo-Fi", "future bass" ... and returns a real preset name, or null. */
@@ -151,3 +158,58 @@ export function defaultConductor(vibe: string, overrides: ConductorOverrides) {
   return { bpm: overrides.bpm ?? g.bpm, key: g.key, timeSignature: overrides.timeSignature ?? ('4/4' as const), preset };
 }
 
+
+// ---------- Live steering ----------
+
+/** A meter the steer text names outright ("7/8", "switch to 5/4"), or null. */
+export function explicitMeter(text: string): TimeSignature | null {
+  const found = text.match(/\b[3-7]\s*\/\s*[48]\b/g)?.map((m) => m.replace(/\s+/g, ''));
+  return (found?.find((m) => (TIME_SIGNATURES as readonly string[]).includes(m)) as TimeSignature | undefined) ?? null;
+}
+
+const METER_HINT: Record<TimeSignature, string> = {
+  '4/4': 'straight four on the floor',
+  '3/4': 'a waltz feel, one-two-three',
+  '5/4': 'think odd grouping 3+2',
+  '7/8': 'think odd grouping 2+2+3',
+  '6/8': 'think two groups of three',
+};
+
+/** One step darker: major-ish keys go minor, dorian goes minor, minor goes phrygian. */
+const darkerKey = (key: string): string => {
+  const tonic = /^\s*([A-G][#b]?)/.exec(key)?.[1] ?? 'A';
+  if (/major|lydian|mixolydian|dorian/i.test(key)) return `${tonic} minor`;
+  if (/minor/i.test(key)) return `${tonic} phrygian`;
+  return key;
+};
+
+/**
+ * What a steer does when the conductor model cannot be reached or fails twice: obvious requests (a meter, half-time, drop, darker, a genre) are applied directly, anything else changes nothing.
+ * An empty `why` means there was nothing to do, and the client then ignores the steer.
+ */
+export function steerFallback(text: string, current: ConductorSettings): ConductorSettings & { why: string } {
+  const next: ConductorSettings = { ...current };
+  const notes: string[] = [];
+  const meter = explicitMeter(text);
+  if (meter && meter !== current.timeSignature) {
+    next.timeSignature = meter;
+    notes.push(`Switching to ${meter}: drums, ${METER_HINT[meter]}.`);
+  }
+  const genre = matchPreset(text);
+  if (genre && /genre|style|make it|switch|go|play/i.test(text) && genre !== current.preset) {
+    next.preset = genre;
+    next.bpm = overridesSafeBpm(GENRE_DEFAULTS[genre].bpm);
+    next.key = GENRE_DEFAULTS[genre].key;
+    notes.push(`Changing genre to ${genre}: everyone, new tempo and new colors.`);
+  }
+  if (/half[- ]?time/i.test(text)) notes.push('Half-time feel: drums, snare on beat three and give the groove room.');
+  if (/\bdrop\b/i.test(text)) notes.push('The drop: hit hard, heavy kick and bass, keys stab.');
+  if (/dark/i.test(text)) {
+    next.key = darkerKey(next.key);
+    next.bpm = overridesSafeBpm(Math.round(next.bpm * 0.92));
+    notes.push('Going darker: lower voicings, minor colors, more space.');
+  }
+  return { ...next, why: notes.join(' ').split(/\s+/).slice(0, 20).join(' ') };
+}
+
+const overridesSafeBpm = (n: number) => Math.min(180, Math.max(60, Math.round(n)));

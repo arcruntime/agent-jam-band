@@ -173,6 +173,20 @@ export const conductorRequestSchema = z.object({
   vibe: z.string().trim().min(1).max(300),
   /** Browser-made id of this run; keys the band's memory in Neo4j */
   sessionId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional(),
+  /** Live steering while the band plays: the listener's text plus the settings the band is using right now */
+  steer: z
+    .object({
+      id: z.string().regex(/^[A-Za-z0-9_:-]{3,100}$/).optional(),
+      text: z.string().trim().min(1).max(200),
+      atBlock: z.number().int().min(0).max(100000).optional(),
+      current: z.object({
+        bpm: z.number().min(40).max(220),
+        key: z.string().min(1).max(40),
+        timeSignature: timeSignatureSchema,
+        preset: z.string().max(20),
+      }),
+    })
+    .optional(),
   overrides: z
     .object({
       bpm: z.number().int().min(60).max(180).optional(),
@@ -191,10 +205,12 @@ export const jamStateSchema = z.object({
   key: z.string().min(1).max(40),
   timeSignature: timeSignatureSchema,
   vibe: z.string().trim().min(1).max(300),
+  steer: z.object({ text: z.string().max(200), direction: z.string().max(300) }).optional(),
   bars: z
     .array(
       z.object({
         key: z.string().max(40).optional(),
+        timeSignature: timeSignatureSchema.optional(),
         drums: z.object({
           kick: looseRow,
           snare: looseRow,

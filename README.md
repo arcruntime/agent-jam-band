@@ -1,6 +1,6 @@
 # Agent Jam Band
 
-A conductor and five AI agents (drums, bass, keys, melody, vox) improvise together while you listen. A Vite + vanilla TypeScript frontend plays the result with Tone.js, and a small Express backend keeps the API keys server-side.
+A conductor and four AI agents (drums, bass, keys and melody) improvise together while you listen. A Vite + vanilla TypeScript frontend plays the result with Tone.js, and a small Express backend keeps the API keys server-side.
 
 ## Run it
 
@@ -33,28 +33,7 @@ The layout is built for a projector: dark theme, band chat on the left, the live
 
 ## Studio (production A/B)
 
-Six switches under the graph work live while the band plays, and none of them restarts or glitches the audio (changes are short ramps): Master bus (EQ, compressor, limiter), Humanize (swing, timing jitter, velocity), Ducking, Reverb & delay sends, Panning (stereo vs mono) and Vox chops (robot vowels made from filtered synths; off: no vox). With Master bus off the limiter is out of the path, so peaks can be louder and harsher; that is the point of the comparison.
-
-## Vox (robot vocal chops)
-
-The vox is currently switched off by one flag, `VOX_ENABLED` in `shared/flags.ts` (set it to `true` to bring it back). While it is `false` the server never calls the vox agent, no vox audio plays, the melody is not asked to leave gaps, and the vox is hidden from the graph, the token counters, the Studio switches and the legend. All the vox code is still there.
-
-The fifth musician, vox, plays vowel chops. There is no audio model, so the voice is built in Tone.js (`src/vox.ts`): an FM sawtooth source goes through an amplitude envelope and three parallel bandpass filters set to the formants of the vowel ("ah", "oh", "ee" or "oo"), then a bit crusher (a stepped WaveShaper), a highpass, a presence dip, a lowpass, a small compressor that evens out the vowels and a bus that is always under the melody. Each chop glides up into its note, and the filters glide to the next vowel. The voice is monophonic. It uses the same block format as the other agents (4 bars of hits on the step grid, each with `step`, `note`, `vowel`, `dur` and an optional `velocity`), it reads band memory, and it can echo a melody motif as a chop (an ECHOES edge in the graph, with `LOCKS_TO` the melody). It has its own graph color, token counter and Studio switch ("Vox chops").
-
-**Each preset has a vox style** (`shared/vox.ts`):
-
-| Presets | Style | What it does |
-| --- | --- | --- |
-| futurebass, house, dnb | stab | Bright pitched stabs one octave above the melody: short "ah" and "oh" chops (180 ms at most) on off-beats and syncopations, highpassed at 400 Hz, a light bitcrush (5 bits in futurebass and house, 6 in dnb) for glitch. |
-| hiphop, lofi | vocoder | A robot voice below the melody: held vowels on chord tones, a warm lowpass at 3.6 kHz, a 5 dB dip around 3.2 kHz that leaves the lead its presence band, a subtle crush (7 bits in hiphop, 8 in lofi), sparse call phrases only. |
-| jazz, ambient | pad | Soft held "oo" vowels (or very sparse airy chops) above the melody, no crush, a big reverb send. |
-| rock | rare | Mostly rests: one or two airy "oo" vowels at the very end of a drop. |
-
-**Call and response, no register fight.** The vox and the melody trade phrases. For each style and section there are windows (a bar and a range of steps in it) that belong to the vox. In a drop the melody plays bars 1 and 2 and the stabs answer on bars 3 and 4 (the melody keeps the downbeat); the vocoder answers in the second half of bars 2 and 4; the pad and the rock chop only use bar 4. In a build the stabs tease in the last part of bars 2 to 4, getting busier, while a lowpass sweeps open bar by bar. In an intro the vox is silent (no model call, no tokens) and in a breakdown it plays one chop at most. The melody agent is told which windows to leave empty (`rest_for_vox`), and the server enforces it on both parts: melody notes that start in a window are removed and a note that would ring into one is shortened, while vox hits outside the windows are dropped and every pitch is moved by octaves into the style's register (stabs from the octave above the melody's middle pitch, the vocoder from about an octave below it). Limits per bar and top velocities are also enforced per style. If the model writes nothing for a section where the vox should play, or fails, the server answers the melody's own pitches inside the windows.
-
-**Level.** The vox bus sits under the melody on every preset, and the kick ducks it a little (60% of the keys' own duck depth). Measured with a vox chop against a melody note on each preset: the stabs peak about 3 dB under the melody (futurebass 3.4, house 3.0, dnb 2.8), the vocoder about 5 dB (hiphop 4.8, lofi 4.8), the pads about 6 dB (jazz 6.4, ambient 6.5) and rock 5.9 dB, and no chop peaked above the melody. Each style has its own reverb send so the vox sits in the same room as the keys and melody.
-
-To trace a quiet vox: the server console prints one `[vox]` line per block (section, style, windows, hits per bar, model or fallback), the browser console prints one per block with the Studio switch state and how many chops have been triggered so far, and `__jam.rig.voxStats()` gives the live trigger count.
+Five switches under the graph work live while the band plays, and none of them restarts or glitches the audio (changes are short ramps): Master bus (EQ, compressor, limiter), Humanize (swing, timing jitter, velocity), Ducking, Reverb & delay sends and Panning (stereo vs mono). With Master bus off the limiter is out of the path, so peaks can be louder and harsher; that is the point of the comparison.
 
 ## Recording
 

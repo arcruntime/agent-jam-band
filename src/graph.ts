@@ -18,6 +18,10 @@ export interface EchoEvent {
 }
 
 const PULSE_MS = 1600;
+/** How long one beat's swell takes to fade, how long an instrument's flash lasts, and how long a brand-new ECHOES edge stays highlighted. */
+const BEAT_MS = 280;
+const FLASH_MS = 240;
+const ECHO_HILITE_MS = 2000;
 const STRUCTURE = 'rgba(139, 143, 163, 0.16)';
 const ECHO = '#ffffff';
 const STEER = '#ff5fa2';
@@ -30,6 +34,18 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
   const nodes = new Map<string, GNode>();
   const seenEchoes = new Set<string>();
   const seenSteers = new Set<string>();
+  // Music reactions. They only change how nodes are drawn (no data or layout changes), and the canvas already repaints every animation frame.
+  let beatPulse = { start: -1e9, strength: 0 };
+  const flashes = new Map<string, number>();
+  const echoSince = new Map<string, number>();
+  const beatEnv = () => {
+    const t = (performance.now() - beatPulse.start) / BEAT_MS;
+    return t >= 1 ? 0 : beatPulse.strength * (1 - t) * (1 - t);
+  };
+  const freshEcho = (l: GLink) => {
+    const since = echoSince.get(`${idOf(l.source)}>${idOf(l.target)}`);
+    return since !== undefined && performance.now() - since < ECHO_HILITE_MS;
+  };
   const pulses = new Map<string, { start: number; strength: number }>();
   let involved = new Set<string>();
   let signature = '';
@@ -49,14 +65,18 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
     })
     .linkColor((l) => {
       const link = l as GLink;
-      if (link.type === 'ECHOES') return ECHO;
+      if (link.type === 'ECHOES') return freshEcho(link) ? ECHO : 'rgba(255,255,255,0.5)';
       if (link.type === 'CHANGED') return STEER + 'cc';
       if (link.type === 'LOCKS_TO') return (nodes.get(idOf(link.source)) && colorOf(nodes.get(idOf(link.source))!)) + '99';
       return STRUCTURE;
     })
-    .linkWidth((l) => ((l as GLink).type === 'ECHOES' ? 2.6 : (l as GLink).type === 'LOCKS_TO' || (l as GLink).type === 'CHANGED' ? 1.3 : 0.6))
+    .linkWidth((l) => {
+      const link = l as GLink;
+      if (link.type === 'ECHOES') return freshEcho(link) ? 6 : 1.8; // a new echo is thick and bright for two seconds, then settles
+      return link.type === 'LOCKS_TO' || link.type === 'CHANGED' ? 1.3 : 0.6;
+    })
     .linkLineDash((l) => ((l as GLink).type === 'LOCKS_TO' || (l as GLink).type === 'CHANGED' ? [4, 3] : null))
-    .linkDirectionalParticles((l) => ((l as GLink).type === 'ECHOES' ? 3 : 0))
+    .linkDirectionalParticles((l) => ((l as GLink).type === 'ECHOES' ? (freshEcho(l as GLink) ? 5 : 1) : 0))
     .linkDirectionalParticleWidth(2.6)
     .linkDirectionalParticleSpeed(0.012)
     .linkDirectionalParticleColor(() => ECHO)
@@ -83,7 +103,21 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
   function paint(n: GNode, ctx: CanvasRenderingContext2D, scale: number) {
     const x = n.x ?? 0;
     const y = n.y ?? 0;
-    const r = radius(n);
+    const r = radius(n) * (1 + 0.3 * beatEnv()); // every node swells a little on each beat, more on beat 1
+    const flashAt = n.type === 'agent' && n.agent ? flashes.get(n.agent) : undefined;
+    if (flashAt !== undefined) {
+      const t = (performance.now() - flashAt) / FLASH_MS;
+      if (t >= 1) flashes.delete(n.agent!);
+      else {
+        // The instrument just played: a halo in its own colour.
+        ctx.beginPath();
+        ctx.arc(x, y, r + 4 + 14 * t, 0, Math.PI * 2);
+        ctx.fillStyle = colorOf(n);
+        ctx.globalAlpha = 0.75 * (1 - t);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
     const pulse = pulses.get(n.id);
     if (pulse) {
       const t = (performance.now() - pulse.start) / PULSE_MS;
@@ -183,6 +217,7 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
         const to = nodes.get(idOf(l.target))!;
         pulse(from.id, 1);
         pulse(to.id, 0.55);
+        echoSince.set(key, performance.now());
         events.push({ from, to, reason: l.reason });
       }
 
@@ -201,7 +236,33 @@ export function createGraphPanel(host: HTMLElement, colors: Record<string, strin
       return events;
     },
 
+    /** One beat of the music: every node swells for a moment (strength 1 = beat 1, about 0.35 = the other beats). */
+    beat(strength: number) {
+      const now = performance.now();
+      const left = beatEnv();
+      // A new beat never cuts a bigger swell short.
+      if (strength >= left) beatPulse = { start: now, strength };
+    },
+
+    /** An instrument just sounded: its hub node flashes in its own colour. */
+    flash(agent: string) {
+      flashes.set(agent, performance.now());
+    },
+
+    /** For tests: what is currently animating. */
+    debug() {
+      const now = performance.now();
+      return {
+        beatEnv: beatEnv(),
+        flashing: [...flashes.keys()],
+        freshEchoes: [...echoSince.entries()].filter(([, t]) => now - t < ECHO_HILITE_MS).map(([k]) => k),
+      };
+    },
+
     clear() {
+      flashes.clear();
+      echoSince.clear();
+      beatPulse = { start: -1e9, strength: 0 };
       nodes.clear();
       seenEchoes.clear();
       seenSteers.clear();

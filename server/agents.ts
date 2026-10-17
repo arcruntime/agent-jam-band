@@ -2,7 +2,8 @@ import { jsonrepair } from 'jsonrepair';
 import type OpenAI from 'openai';
 import type { z } from 'zod';
 import { meterOf, type Meter } from '../shared/meter.js';
-import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar } from '../shared/types.js';
+import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
+import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar, TokenUsage } from '../shared/types.js';
 import { config } from './config.js';
 import {
   defaultBass,
@@ -35,7 +36,15 @@ import {
 
 type Msg = OpenAI.Chat.ChatCompletionMessageParam;
 
-export class AgentError extends Error {}
+export class AgentError extends Error {
+  constructor(
+    message: string,
+    /** Tokens the failed attempts still used */
+    readonly usage?: TokenUsage,
+  ) {
+    super(message);
+  }
+}
 
 const CONTEXT_BARS = 8;
 const DUR_LIST = DURATIONS.map((d) => `"${d}"`).join(', ');
@@ -110,20 +119,25 @@ const melodySystem = (m: Meter) =>
     `Rules: "bars" has exactly 4 arrays, one per bar; a bar may be empty but there must be at least 3 notes across the 4 bars. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic). note is scientific pitch notation such as "E5" or "F#4", in octaves 4 to 6 (C4 to C6). dur is one of ${DUR_LIST}. Use at most 12 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
+/** The preset menu the conductor chooses from (it must pick the closest one; there is no other sound to choose). */
+const PRESET_CHOICES =
+  'one of "lofi" (lo-fi, chill, bossa nova, study beats), "hiphop" (boom bap, hip hop, rap, heavy swing), "jazz" (jazz, swing, bebop, swung ride and walking bass), "futurebass" (future bass, EDM, trap, dubstep, synth pop), "house" (house, techno, disco, dance, garage), "dnb" (drum and bass, jungle, breakbeats, reese bass), "rock" (rock, punk, metal, indie, funk, blues) or "ambient" (ambient, cinematic, drone, new age). There are no other presets, so choose the closest one.';
+const PRESET_NAMES = SOUND_PRESETS.join(', ');
+
 const CONDUCTOR_SYSTEM = [
   `You are the CONDUCTOR of ${BAND}. Before the band plays, you read the vibe the listener asked for and choose the tempo, key and time signature.`,
   `Pick a genre-appropriate BPM (quarter notes per minute, between 60 and 180). Reference points: ambient 60-80, reggae 70-90, lo-fi hip hop 80-90, boom bap 85-95, disco 115-125, house 120-128, bossa nova 120-140, techno 125-135, trap 130-150, dubstep 138-142, future bass 140-150, drum and bass 170-176. Read the mood too: a sleepy vibe sits at the low end of its genre and an energetic one at the high end.`,
   `Pick the time signature: "4/4" unless the vibe calls for something else (a waltz or jazz waltz is "3/4", a shuffle, ballad or jig feel is "6/8", progressive or odd-meter vibes can use "5/4" or "7/8"). Pick a key with a mode that suits the mood, written as a note name plus a mode, for example "A minor", "F# dorian" or "Eb major".`,
-  `Also pick the sound preset that matches the genre, one of "lofi" (lo-fi, chill, jazzy, bossa nova, boom bap), "futurebass" (future bass, EDM, trap, dubstep, synth pop), "house" (house, techno, disco, dance), "rock" (rock, punk, metal, indie, funk, blues) or "ambient" (ambient, cinematic, drone, new age).`,
+  `Also pick the sound preset that matches the genre, ${PRESET_CHOICES}`,
   `If the request includes "fixed_by_user", those values were chosen by the listener: return them exactly as given and choose everything else to suit them.`,
-  `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of lofi, futurebass, house, rock, ambient>", "why": "<one short sentence, at most 20 words, naming the genre or feel and why you chose this tempo, key and meter>"}`,
+  `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of ${PRESET_NAMES}>", "why": "<one short sentence, at most 20 words, naming the preset you picked and why, for example: Jazz preset for the swung ride and walking bass at 128 BPM. If no preset fits the genre exactly, say which one is closest, for example: No garage kit, using house.>"}`,
 ].join('\n\n');
 
 const STEER_SYSTEM = [
   `You are the CONDUCTOR of ${BAND}. The band is already playing. The listener types a short steering instruction, sometimes just a word or a button label such as "7/8", "5/4", "half-time", "drop", "darker" or "genre: jazz", and you return the updated settings for the next phrase.`,
   `You are given the "current" settings and the instruction. Change only what the instruction asks for and keep everything else as in "current". A meter such as "7/8" or "waltz" changes the time signature (and nudges nothing else unless needed). "half-time" means a half-time feel: keep the bpm, and tell the drummer to put the snare on beat three and thin out the hats. "drop" means the full-energy moment: keep the tempo and meter, choose the most energetic preset that suits the genre, and tell drums and bass to hit hard with a heavy kick and sub bass and the keys to stab. "darker" means a darker mood: move the key toward minor (or phrygian if it is already minor), take a little off the tempo, and tell the band for lower voicings and more space. "genre: X" or any genre name means switch to that genre: pick a genre-appropriate bpm, key, meter and preset. Anything else, use your judgement as a bandleader.`,
-  `Reference BPMs: ambient 60-80, reggae 70-90, lo-fi hip hop 80-90, boom bap 85-95, jazz 100-140, disco 115-125, house 120-128, bossa nova 120-140, techno 125-135, trap 130-150, dubstep 138-142, future bass 140-150, drum and bass 170-176. The time signature is one of "4/4", "3/4", "5/4", "7/8", "6/8". The preset is one of "lofi" (lo-fi, chill, jazzy, bossa nova, boom bap), "futurebass" (future bass, EDM, trap, dubstep, synth pop), "house" (house, techno, disco, dance), "rock" (rock, punk, metal, indie, funk, blues) or "ambient" (ambient, cinematic, drone, new age).`,
-  `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of lofi, futurebass, house, rock, ambient>", "why": "<one short sentence, at most 20 words, spoken by you to the band, naming the change and giving each player a hint, for example: Switching to 7/8: drums, think odd grouping 2+2+3.>"}`,
+  `Reference BPMs: ambient 60-80, reggae 70-90, lo-fi hip hop 80-90, boom bap 85-95, jazz 100-140, disco 115-125, house 120-128, bossa nova 120-140, techno 125-135, trap 130-150, dubstep 138-142, future bass 140-150, drum and bass 170-176. The time signature is one of "4/4", "3/4", "5/4", "7/8", "6/8". The preset is one of the available sound presets: ${PRESET_CHOICES}`,
+  `${JSON_ONLY} {"bpm": <integer 60-180>, "key": "<tonic> <mode>", "timeSignature": "<one of 4/4, 3/4, 5/4, 7/8, 6/8>", "preset": "<one of ${PRESET_NAMES}>", "why": "<one short sentence, at most 20 words, spoken by you to the band, naming the change (and the preset, if you changed it, and why) and giving each player a hint, for example: Switching to 7/8: drums, think odd grouping 2+2+3. If a requested genre has no preset, say which one is closest, for example: No garage kit, using house.>"}`,
 ].join('\n\n');
 
 // ---------- Running one agent ----------
@@ -144,6 +158,15 @@ function parseReply(text: string): unknown {
 interface AgentResult<T> {
   data: T;
   latencyMs: number;
+  tokens?: TokenUsage;
+}
+
+/** Adds one completion's usage report (if it had one) to a running total. */
+function addUsage(total: TokenUsage | undefined, usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined | null): TokenUsage | undefined {
+  if (!usage) return total;
+  const prompt = (total?.prompt ?? 0) + (usage.prompt_tokens ?? 0);
+  const completion = (total?.completion ?? 0) + (usage.completion_tokens ?? 0);
+  return { prompt, completion, total: (total?.total ?? 0) + (usage.total_tokens ?? (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0)) };
 }
 
 /** Flips to false (once, for the life of the process) if the provider turns out not to accept response_format. */
@@ -182,6 +205,7 @@ async function runAgent<T>(name: string, system: string, user: string, schema: z
   const effort = reasoningParams(pinnedEffort).reasoning_effort ?? 'off';
   const callStarted = Date.now();
   let lastProblem = '';
+  let usage: TokenUsage | undefined;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const started = Date.now();
@@ -192,12 +216,13 @@ async function runAgent<T>(name: string, system: string, user: string, schema: z
       const res = await createCompletion(messages, pinnedEffort);
       text = res.choices[0]?.message?.content ?? '';
       tokens = res.usage ? `${res.usage.prompt_tokens}+${res.usage.completion_tokens}=${res.usage.total_tokens}` : 'n/a';
+      usage = addUsage(usage, res.usage);
       const parsed = schema.safeParse(parseReply(text));
       if (parsed.success) {
         const total = Date.now() - callStarted;
         console.log(`[${name}] attempt ${attempt}/2 ok latency=${Date.now() - started}ms tokens(prompt+completion=total)=${tokens} effort=${effort}`);
         console.log(`[${name}] done latency=${total}ms attempts=${attempt}`);
-        return { data: parsed.data, latencyMs: total };
+        return { data: parsed.data, latencyMs: total, tokens: usage };
       }
       problem = describeIssues(parsed.error);
     } catch (err) {
@@ -215,7 +240,7 @@ async function runAgent<T>(name: string, system: string, user: string, schema: z
   }
 
   console.error(`[${name}] gave up latency=${Date.now() - callStarted}ms attempts=2`);
-  throw new AgentError(`${name} agent failed twice. Last problem: ${lastProblem}`);
+  throw new AgentError(`${name} agent failed twice. Last problem: ${lastProblem}`, usage);
 }
 
 interface Fallback<B> {
@@ -238,15 +263,16 @@ async function guarded<B>(
 ): Promise<AgentReply<B>> {
   const started = Date.now();
   try {
-    const { data, latencyMs } = await run();
+    const { data, latencyMs, tokens } = await run();
     const { echoes = null, ...reply } = data;
     if (ctx) remember(ctx, name, { bars: reply.bars, why: reply.why, echoes, fallback: false });
-    return { ...reply, latencyMs, ...(echoes ? { echoed: true } : {}) };
+    return { ...reply, latencyMs, ...(tokens ? { tokens } : {}), ...(echoes ? { echoed: true } : {}) };
   } catch (err) {
     const { bars, source } = fallback();
     console.error(`[${name}] FALLBACK (${source}) because: ${(err as Error).message}`);
     if (ctx) remember(ctx, name, { bars, why: '', echoes: null, fallback: true });
-    return { why: '', bars, latencyMs: Date.now() - started, fallback: true };
+    const spent = err instanceof AgentError ? err.usage : undefined; // the failed attempts still cost tokens
+    return { why: '', bars, latencyMs: Date.now() - started, fallback: true, ...(spent ? { tokens: spent } : {}) };
   }
 }
 
@@ -288,7 +314,7 @@ export async function conductorAgent(vibe: string, overrides: ConductorOverrides
   });
   try {
     // The conductor always runs at reasoning_effort "low".
-    const { data, latencyMs } = await runAgent('conductor', CONDUCTOR_SYSTEM, user, conductorReplySchema, 'low');
+    const { data, latencyMs, tokens } = await runAgent('conductor', CONDUCTOR_SYSTEM, user, conductorReplySchema, 'low');
 
     // The listener's manual choices always win, even if the model drifted from them.
     const bpm = overrides.bpm ?? data.bpm;
@@ -298,12 +324,20 @@ export async function conductorAgent(vibe: string, overrides: ConductorOverrides
     }
     const preset = normalizePreset(data.preset) ?? presetFromVibe(vibe);
     if (!normalizePreset(data.preset)) console.warn(`[conductor] unusable preset ${JSON.stringify(data.preset)}; using "${preset}" from the vibe`);
-    return { bpm, key: data.key, timeSignature, preset, why: data.why, latencyMs };
+    return { bpm, key: data.key, timeSignature, preset, why: sayPreset(data.why, preset), latencyMs, ...(tokens ? { tokens } : {}) };
   } catch (err) {
     const d = defaultConductor(vibe, overrides);
     console.error(`[conductor] FALLBACK (defaults: ${d.bpm} BPM, ${d.key}, ${d.timeSignature}, ${d.preset}) because: ${(err as Error).message}`);
-    return { ...d, why: '', latencyMs: Date.now() - started, fallback: true };
+    const spent = err instanceof AgentError ? err.usage : undefined;
+    return { ...d, why: '', latencyMs: Date.now() - started, fallback: true, ...(spent ? { tokens: spent } : {}) };
   }
+}
+
+/** The chat line must say which preset was picked. If the model's sentence does not name it, a short suffix does. */
+function sayPreset(why: string, preset: SoundPreset): string {
+  if (!why.trim()) return why;
+  const key = preset === 'futurebass' ? 'future' : preset === 'hiphop' ? 'hip' : preset;
+  return new RegExp(key, 'i').test(why) ? why : `${why.trim()} Preset: ${preset}.`;
 }
 
 const recallFor = (ctx: Ctx, agent: MemoryAgent): Promise<BandMemoryItem[]> => (ctx ? recall(ctx, agent) : Promise.resolve([]));
@@ -316,14 +350,15 @@ export async function conductorSteerAgent(vibe: string, current: ConductorSettin
   const started = Date.now();
   const user = JSON.stringify({ vibe, current, steer: text, task: 'Apply the listener steering instruction to the current settings.' });
   try {
-    const { data, latencyMs } = await runAgent('conductor-steer', STEER_SYSTEM, user, conductorReplySchema, 'low');
+    const { data, latencyMs, tokens } = await runAgent('conductor-steer', STEER_SYSTEM, user, conductorReplySchema, 'low');
     const timeSignature = explicitMeter(text) ?? data.timeSignature;
     const preset = normalizePreset(data.preset) ?? current.preset;
-    return { bpm: data.bpm, key: data.key, timeSignature, preset, why: data.why, latencyMs };
+    return { bpm: data.bpm, key: data.key, timeSignature, preset, why: sayPreset(data.why, preset), latencyMs, ...(tokens ? { tokens } : {}) };
   } catch (err) {
     const fb = steerFallback(text, current);
     console.error(`[conductor-steer] FALLBACK (${fb.why ? 'rules' : 'no change'}) because: ${(err as Error).message}`);
-    return { ...fb, latencyMs: Date.now() - started, fallback: true };
+    const spent = err instanceof AgentError ? err.usage : undefined;
+    return { ...fb, latencyMs: Date.now() - started, fallback: true, ...(spent ? { tokens: spent } : {}) };
   }
 }
 

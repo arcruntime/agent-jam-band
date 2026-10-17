@@ -129,15 +129,22 @@ const GENRE_DEFAULTS: Record<SoundPreset, { bpm: number; key: string }> = {
   house: { bpm: 124, key: 'A minor' },
   rock: { bpm: 120, key: 'E minor' },
   ambient: { bpm: 70, key: 'D minor' },
+  dnb: { bpm: 174, key: 'F minor' },
+  jazz: { bpm: 126, key: 'D dorian' },
+  hiphop: { bpm: 90, key: 'G minor' },
 };
 
 /** The sound preset a piece of text names (a genre or a mood), or null when it names none. */
 export function matchPreset(text: string): SoundPreset | null {
+  if (/drum\s*(?:and|&|n)\s*bass|\bdnb\b|\bd&b\b|jungle|breakbeat|neurofunk|reese/i.test(text)) return 'dnb';
+  if (/lo-?fi/i.test(text)) return 'lofi'; // "lo-fi hip hop" is still lo-fi
+  if (/jazz|swing|bebop|big band|bossa/i.test(text)) return 'jazz';
+  if (/hip.?hop|boom bap|\brap\b/i.test(text)) return 'hiphop';
   if (/future\s*bass|dubstep|trap|\bedm\b|synthwave|hyperpop|electro|festival/i.test(text)) return 'futurebass';
   if (/house|techno|disco|dance|club|garage|trance/i.test(text)) return 'house';
   if (/rock|punk|metal|grunge|indie|funk|blues|guitar/i.test(text)) return 'rock';
   if (/ambient|drone|cinematic|new age|sleep|meditat|space|drift/i.test(text)) return 'ambient';
-  if (/lo-?fi|jazz|bossa|chill|hip.?hop|boom bap|soul|study/i.test(text)) return 'lofi';
+  if (/chill|soul|study/i.test(text)) return 'lofi';
   return null;
 }
 

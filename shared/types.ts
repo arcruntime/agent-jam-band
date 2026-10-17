@@ -64,8 +64,16 @@ export interface JamState {
 }
 
 /** What each musician returns: a one-line note plus 4 bars. */
+/** Tokens one agent call used (both attempts, if it retried), from the provider's usage report. Missing when the provider reports none. */
+export interface TokenUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
 export interface AgentReply<T> {
   why: string;
+  tokens?: TokenUsage;
   bars: T[];
   /** Server-side time for the whole agent call, retries included */
   latencyMs: number;
@@ -103,6 +111,7 @@ export interface ConductorReply {
   /** Sound preset for the synths and effects */
   preset: SoundPreset;
   why: string;
+  tokens?: TokenUsage;
   latencyMs: number;
   fallback?: boolean;
 }

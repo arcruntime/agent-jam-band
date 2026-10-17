@@ -12,9 +12,10 @@ import type {
   GraphPayload,
   JamState,
   MelodyBar,
+  TokenUsage,
 } from '../shared/types';
 import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
-import { getRig } from './audio';
+import { getRig, type StudioKey } from './audio';
 import { createGraphPanel, type EchoEvent } from './graph';
 import { Pipeline, type Block } from './pipeline';
 import { stepEvents, strongSteps } from './steps';
@@ -33,6 +34,18 @@ type Chunk = Block<BlockParts>;
 type PartName = keyof BlockParts;
 type Who = 'conductor' | PartName | 'system' | 'steer';
 type Mode = 'idle' | 'loading' | 'playing';
+
+/** Who gets a token counter. */
+const TOKEN_AGENTS = ['conductor', 'drums', 'bass', 'keys', 'melody'] as const;
+
+/** The Studio switches, each with a one-line plain explanation. */
+const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
+  { key: 'master', name: 'Master bus', why: 'EQ, compressor and limiter glue the mix and stop clipping. Off: raw and louder.' },
+  { key: 'humanize', name: 'Humanize', why: 'Swing, timing wobble and varied hit strength. Off: a rigid grid, every hit equal.' },
+  { key: 'ducking', name: 'Ducking', why: 'Keys dip when the kick hits, creating the pumping feel.' },
+  { key: 'sends', name: 'Reverb & delay', why: 'Keys and melody share a room; melody gets an echo. Off: dry and close.' },
+  { key: 'stereo', name: 'Panning', why: 'Keys a little left, melody a little right. Off: everything dead center (mono).' },
+];
 
 /** Quick steers: the label is also the text sent to the conductor. */
 const QUICK_STEERS = ['7/8', '5/4', 'half-time', 'drop', 'darker', 'genre: jazz'];
@@ -76,47 +89,56 @@ interface Session {
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
-  <main>
-    <header>
-      <h1>Agent Jam Band</h1>
-      <p class="sub">A conductor sets the tempo, key and meter. Then drums, bass, keys and melody are four AI agents, each reading the ones before it.</p>
-    </header>
-    <section class="panel bar">
-      <div class="field vibe">
-        <label for="vibe">Vibe</label>
-        <input id="vibe" type="text" maxlength="300" placeholder="${DEFAULT_VIBE}" autocomplete="off" />
+  <main class="stage">
+    <header class="top">
+      <div class="toprow">
+        <h1>Agent Jam Band</h1>
+        <div class="field vibe">
+          <label for="vibe">Vibe</label>
+          <input id="vibe" type="text" maxlength="300" placeholder="${DEFAULT_VIBE}" autocomplete="off" />
+        </div>
+        <div class="field small">
+          <label for="bpm">BPM</label>
+          <input id="bpm" type="number" inputmode="numeric" min="${BPM_MIN}" max="${BPM_MAX}" step="1" placeholder="Auto" title="Blank = the conductor picks" />
+        </div>
+        <div class="field small">
+          <label for="meter">Time</label>
+          <select id="meter" title="Auto = the conductor picks">
+            <option value="">Auto</option>
+            ${TIME_SIGNATURES.map((t) => `<option value="${t}">${t}</option>`).join('')}
+          </select>
+        </div>
+        <div class="actions">
+          <button id="start">Start</button>
+          <button id="stop" class="ghost" disabled>Stop</button>
+        </div>
       </div>
-      <div class="field">
-        <label for="bpm">BPM</label>
-        <input id="bpm" type="number" inputmode="numeric" min="${BPM_MIN}" max="${BPM_MAX}" step="1" placeholder="Auto" title="Blank = the conductor picks" />
-      </div>
-      <div class="field">
-        <label for="meter">Time</label>
-        <select id="meter" title="Auto = the conductor picks">
-          <option value="">Auto</option>
-          ${TIME_SIGNATURES.map((t) => `<option value="${t}">${t}</option>`).join('')}
-        </select>
-      </div>
-      <div class="actions">
-        <button id="start">Start</button>
-        <button id="stop" class="ghost" disabled>Stop</button>
-      </div>
-    </section>
-    <div class="workspace">
-      <div class="col-main">
-        <section class="panel player">
-          <dl class="meta">
-            <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
-            <div><dt>Key</dt><dd id="metaKey">–</dd></div>
-            <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
-            <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
-          </dl>
-          <div class="beat" id="beat" role="img" aria-label="Beat counter">
-            <div class="beat-num" id="beatNum">–</div>
-            <div class="beat-pips" id="beatPips"></div>
-          </div>
+      <div class="statusrow">
+        <dl class="meta">
+          <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
+          <div><dt>Key</dt><dd id="metaKey">–</dd></div>
+          <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
+          <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
+        </dl>
+        <div class="beat" id="beat" role="img" aria-label="Beat counter">
+          <div class="beat-num" id="beatNum">–</div>
+          <div class="beat-pips" id="beatPips"></div>
+        </div>
+        <div class="tokens" id="tokens" title="Tokens used this session, from the model's usage reports">
+          <div class="tok total"><span>Tokens</span><b id="tokTotal">0</b></div>
+          ${TOKEN_AGENTS.map((a) => `<div class="tok" data-agent="${a}"><span>${a}</span><b>0</b></div>`).join('')}
+        </div>
+        <div class="nowbox">
           <p id="now" class="now">Warming up the band…</p>
           <p id="next" class="next"></p>
+        </div>
+      </div>
+    </header>
+    <div class="split">
+      <div class="left">
+        <section class="panel chat">
+          <h2>Band chat</h2>
+          <ol id="log" aria-live="polite"></ol>
         </section>
         <section class="panel steer-panel" id="steerPanel" hidden>
           <h2>Steer the band</h2>
@@ -129,23 +151,33 @@ app.innerHTML = `
           </div>
           <p id="steerNote" class="steer-note"></p>
         </section>
-        <section class="panel chat">
-          <h2>Band chat</h2>
-          <ol id="log" aria-live="polite"></ol>
+      </div>
+      <div class="right">
+        <aside class="panel graph">
+          <h2>Band memory</h2>
+          <ul class="legend">
+            <li><i style="background: var(--drums)"></i>Drums</li>
+            <li><i style="background: var(--bass)"></i>Bass</li>
+            <li><i style="background: var(--keys)"></i>Keys</li>
+            <li><i style="background: var(--melody)"></i>Melody</li>
+            <li><i class="echo"></i>Echo</li>
+            <li><i class="steer"></i>Steer</li>
+          </ul>
+          <div id="graphHost" class="graph-host"></div>
+        </aside>
+        <section class="panel studio" id="studio">
+          <h2>Studio: switch it off to hear what it does</h2>
+          <ul class="studio-list">
+            ${STUDIO_TOOLS.map(
+              (t) => `<li class="studio-item">
+              <button type="button" class="sw" role="switch" aria-checked="true" data-studio="${t.key}" aria-label="${t.name}">ON</button>
+              <span class="studio-name">${t.name}</span>
+              <p class="studio-why">${t.why}</p>
+            </li>`,
+            ).join('')}
+          </ul>
         </section>
       </div>
-      <aside class="panel graph">
-        <h2>Band memory</h2>
-        <ul class="legend">
-          <li><i style="background: var(--drums)"></i>Drums</li>
-          <li><i style="background: var(--bass)"></i>Bass</li>
-          <li><i style="background: var(--keys)"></i>Keys</li>
-          <li><i style="background: var(--melody)"></i>Melody</li>
-          <li><i class="echo"></i>Echo</li>
-          <li><i class="steer"></i>Steer</li>
-        </ul>
-        <div id="graphHost" class="graph-host"></div>
-      </aside>
     </div>
     <footer class="credits">Sampled sounds via smplr · Wurlitzer EP200 by Greg Sullivan (CC BY 3.0) · drum machines from smpldsnds/drum-machines · grand piano from sfzinstruments/SplendidGrandPiano · see README for licenses</footer>
   </main>
@@ -180,6 +212,30 @@ const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphH
   keys: cssVar('--keys'),
   melody: cssVar('--melody'),
 });
+
+// ---------- Token counters ----------
+
+const tokTotalEl = document.querySelector<HTMLElement>('#tokTotal')!;
+const tokEls = new Map<string, HTMLElement>(TOKEN_AGENTS.map((a) => [a, document.querySelector<HTMLElement>(`.tok[data-agent="${a}"] b`)!]));
+const tokens = new Map<string, number>();
+const fmtTokens = (n: number) => (n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** Adds one reply's reported usage to its agent's counter and the session total. A reply without usage adds nothing. */
+function addTokens(agent: string, usage?: TokenUsage) {
+  const n = usage?.total ?? 0;
+  if (!n || !tokEls.has(agent)) return;
+  tokens.set(agent, (tokens.get(agent) ?? 0) + n);
+  tokEls.get(agent)!.textContent = fmtTokens(tokens.get(agent)!);
+  let sum = 0;
+  for (const v of tokens.values()) sum += v;
+  tokTotalEl.textContent = fmtTokens(sum);
+}
+
+function resetTokens() {
+  tokens.clear();
+  for (const el of tokEls.values()) el.textContent = '0';
+  tokTotalEl.textContent = '0';
+}
 
 const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System', steer: 'You' };
 
@@ -332,6 +388,7 @@ async function runStage<T>(s: Session, who: PartName, n: number, earlier: object
   const epoch = s.epoch;
   const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier, memory: { sessionId: s.id, block: n } }, s.abort.signal);
   if (session !== s || s.epoch !== epoch) throw new Error('stopped'); // stopped, or steered away from while this was being written
+  addTokens(who, reply.tokens);
   if (reply.why) log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
   record(reply.bars);
   if (reply.echoed) void refreshGraph(s); // a new ECHOES edge is on its way into the graph
@@ -498,11 +555,24 @@ function tick(s: Session, time: number) {
     const beat = inBar / s.stepsPerBeat + 1;
     const total = s.beats;
     Tone.getDraw().schedule(() => {
-      if (session === s) renderBeat(beat, total);
+      if (session !== s) return;
+      renderBeat(beat, total);
+      if (beat === 1) graphPanel.beat(1);
     }, time);
   }
 
-  getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar, s.strong), time);
+  const ev = stepEvents(s.current.parts, pos, s.stepsPerBar, s.strong);
+  const sounding: string[] = [];
+  if (ev.kick || ev.snare || ev.hat) sounding.push('drums');
+  if (ev.bass.length) sounding.push('bass');
+  if (ev.keys.length) sounding.push('keys');
+  if (ev.melody.length) sounding.push('melody');
+  if (sounding.length) {
+    Tone.getDraw().schedule(() => {
+      if (session === s) for (const a of sounding) graphPanel.flash(a);
+    }, time);
+  }
+  getRig().play(ev, time);
   s.step += 1;
 }
 
@@ -560,6 +630,7 @@ async function steer(raw: string) {
       steer: { id, text, atBlock: s.current.n, current: s.target },
     });
     if (session !== s) return;
+    addTokens('conductor', out.tokens);
     if (!out.why) {
       log('conductor', "Got it. We'll keep going as we are.", 'no change');
       steerNote.textContent = '';
@@ -604,6 +675,7 @@ async function start() {
   setMode('loading');
   logEl.replaceChildren();
   graphPanel.clear();
+  resetTokens();
   metaBpmEl.textContent = metaKeyEl.textContent = metaMeterEl.textContent = metaSoundEl.textContent = '–';
   log('system', `Vibe: "${vibe}".`);
 
@@ -614,6 +686,7 @@ async function start() {
     nowEl.textContent = 'The conductor is choosing tempo, key and meter…';
     const c = await post<ConductorReply>('/api/agents/conductor', { vibe, overrides, sessionId: s.id });
     if (session !== s) return;
+    addTokens('conductor', c.tokens);
     s.state.tempo = c.bpm;
     s.state.key = c.key;
     s.state.timeSignature = c.timeSignature;
@@ -654,6 +727,12 @@ async function start() {
   transport.cancel(0);
   transport.position = 0;
   transport.scheduleRepeat((time) => tick(s, time), '16n');
+  // Quarter-note pulse for the graph (beat 1 gets the bigger pulse from the beat counter above).
+  transport.scheduleRepeat((time) => {
+    Tone.getDraw().schedule(() => {
+      if (session === s) graphPanel.beat(0.35);
+    }, time);
+  }, '4n');
   transport.start('+0.1');
   setMode('playing');
   renderStatus(s);
@@ -672,6 +751,18 @@ function stop() {
   setMode('idle');
   log('system', 'Stopped.');
 }
+
+// ---------- Studio switches ----------
+
+const studioEl = document.querySelector<HTMLElement>('#studio')!;
+studioEl.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-studio]');
+  if (!btn) return;
+  const on = btn.getAttribute('aria-checked') !== 'true';
+  btn.setAttribute('aria-checked', String(on));
+  btn.textContent = on ? 'ON' : 'OFF';
+  getRig().setStudio(btn.dataset.studio as StudioKey, on);
+});
 
 steerForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -696,4 +787,9 @@ for (const el of [vibeEl, bpmEl]) {
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') void start();
   });
+}
+
+// Test hook for the headless checks (dev server only).
+if (import.meta.env.DEV) {
+  (window as unknown as { __jam: unknown }).__jam = { graph: graphPanel, rig: getRig(), tokens: () => Object.fromEntries(tokens) };
 }

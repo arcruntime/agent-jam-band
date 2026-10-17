@@ -27,6 +27,18 @@ Most of the band is Tone.js synths. Where a preset calls for it, real sampled in
 
 Bass and melody are always synths. The samples are not bundled: smplr downloads them when the page opens (hence the "Warming up the band…" state) and they need an internet connection. If a sample set fails to load, that preset quietly plays on its synth and the reason is logged to the browser console.
 
+## Demo screen
+
+The layout is built for a projector: dark theme, band chat on the left, the live band-memory graph on the right, and a compact header with tempo, key, meter, sound, the beat counter and token counters (per agent plus a session total, taken from the model's usage reports). The graph pulses on every beat (bigger on beat 1), an agent's node flashes in its color when its instrument plays, and a new ECHOES edge is highlighted for two seconds.
+
+## Studio (production A/B)
+
+Five switches under the graph work live while the band plays, and none of them restarts or glitches the audio (changes are short ramps): Master bus (EQ, compressor, limiter), Humanize (swing, timing jitter, velocity), Ducking, Reverb & delay sends, and Panning (stereo vs mono). With Master bus off the limiter is out of the path, so peaks can be louder and harsher; that is the point of the comparison.
+
+## Genres
+
+Presets: lofi, futurebass, house, rock, ambient, dnb (fast, reese-style bass), jazz (swung ride, EP or piano keys) and hiphop (heavy swing, 808 drums). The conductor picks the closest preset from this list and names it, and why, in its chat line (for example "No garage kit, using house."). What each musician plays rhythmically is still decided by the agents; the preset sets the sound, swing and tempo feel.
+
 ## Sample credits and licenses
 
 - **smplr**, the sampler library, by danigb: MIT license. https://github.com/danigb/smplr

@@ -19,11 +19,12 @@ import * as Tone from 'tone';
 import type { SoundPreset } from '../shared/presets';
 import type { StepEvents } from './steps';
 
-type Wave = 'sawtooth' | 'square';
+type Wave = 'sawtooth' | 'square' | 'triangle' | 'sine' | 'fatsawtooth';
 
 /** Random timing slack, in seconds, on everything except the kick. */
 const JITTER_S = 0.008;
 const jitter = () => (Math.random() * 2 - 1) * JITTER_S;
+
 
 // ---------- Sampled instruments (smplr) ----------
 
@@ -45,6 +46,9 @@ const SAMPLE_PLAN: Record<SoundPreset, { drums: DrumKit | null; keys: KeysKit | 
   house: { drums: '808', keys: null },
   rock: { drums: 'rock', keys: null },
   ambient: { drums: null, keys: 'piano' },
+  dnb: { drums: null, keys: null }, // breakbeats and a reese bass are synth territory
+  jazz: { drums: null, keys: 'piano' }, // the ride is the synth hat with a long decay
+  hiphop: { drums: '808', keys: 'ep' },
 };
 
 /** Give up waiting for a kit after this long: the preset stays on its synth (a kit that arrives later is still picked up). */
@@ -79,12 +83,13 @@ const vel127 = (v: number) => Math.max(1, Math.min(127, Math.round(v * 127)));
 interface PresetSettings {
   /** Master lowpass in Hz: lower = duller, warmer */
   masterLowpass: number;
-  /** Tone.Transport swing (0-1), applied to sixteenths */
+  /** Tone.Transport swing (0-1) and the note length it applies to (sixteenths unless stated: jazz swings the eighths) */
   swing: number;
+  swingSub?: '16n' | '8n';
   kick: { octaves: number; decay: number; volume: number };
   snare: { noiseDecay: number; noiseHighpass: number; noiseVolume: number; toneHz: number; toneVolume: number };
   hat: { decay: number; volume: number; hz: number; resonance: number };
-  bass: { wave: Wave; baseFrequency: number; filterOctaves: number; q: number; distortion: number; release: number; volume: number };
+  bass: { wave: Wave; spread?: number; baseFrequency: number; filterOctaves: number; q: number; distortion: number; release: number; volume: number };
   keys: { spread: number; attack: number; release: number; lowpass: number; reverbWet: number; reverbDecay: number; duckDb: number; volume: number };
   melody: { wave: Wave; attack: number; release: number; lowpass: number; vibratoHz: number; vibratoDepth: number; delayWet: number; delayFeedback: number; reverbSend: number; volume: number };
 }
@@ -145,11 +150,67 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
     keys: { spread: 50, attack: 0.6, release: 3, lowpass: 3000, reverbWet: 0.6, reverbDecay: 6, duckDb: -2, volume: -24 },
     melody: { wave: 'square', attack: 0.1, release: 1.5, lowpass: 1800, vibratoHz: 4, vibratoDepth: 0.2, delayWet: 0.35, delayFeedback: 0.45, reverbSend: 0.4, volume: -22 },
   },
+  // Fast and tight: snappy kick and snare, bright hats, a detuned "reese" bass (two saws pulling against each other) with a growling filter.
+  dnb: {
+    masterLowpass: 16000,
+    swing: 0,
+    kick: { octaves: 5, decay: 0.2, volume: -3 },
+    snare: { noiseDecay: 0.12, noiseHighpass: 2000, noiseVolume: -11, toneHz: 230, toneVolume: -15 },
+    hat: { decay: 0.03, volume: -29, hz: 420, resonance: 5200 },
+    bass: { wave: 'fatsawtooth', spread: 38, baseFrequency: 70, filterOctaves: 3.2, q: 4, distortion: 0.35, release: 0.15, volume: -8 },
+    keys: { spread: 35, attack: 0.02, release: 0.5, lowpass: 3000, reverbWet: 0.3, reverbDecay: 2, duckDb: -9, volume: -23 },
+    melody: { wave: 'sawtooth', attack: 0.01, release: 0.3, lowpass: 6000, vibratoHz: 5.5, vibratoDepth: 0.1, delayWet: 0.25, delayFeedback: 0.35, reverbSend: 0.2, volume: -18 },
+  },
+  // Smoky and loose: triplet-swung eighths, a soft kick, a ride (the hat voice left to ring), a round walking bass, a piano.
+  jazz: {
+    masterLowpass: 9000,
+    swing: 0.5,
+    swingSub: '8n',
+    kick: { octaves: 4, decay: 0.22, volume: -12 },
+    snare: { noiseDecay: 0.1, noiseHighpass: 1800, noiseVolume: -22, toneHz: 200, toneVolume: -24 },
+    hat: { decay: 0.32, volume: -27, hz: 380, resonance: 2500 },
+    bass: { wave: 'triangle', baseFrequency: 100, filterOctaves: 1.5, q: 1, distortion: 0, release: 0.25, volume: -6 },
+    keys: { spread: 12, attack: 0.02, release: 1, lowpass: 2600, reverbWet: 0.3, reverbDecay: 2, duckDb: 0, volume: -23 },
+    melody: { wave: 'triangle', attack: 0.02, release: 0.4, lowpass: 3000, vibratoHz: 5, vibratoDepth: 0.1, delayWet: 0.15, delayFeedback: 0.25, reverbSend: 0.25, volume: -19 },
+  },
+  // Boom bap: heavy kick and snare, a round sub, dusty top end and a very late off-beat (heavy swing).
+  hiphop: {
+    masterLowpass: 7500,
+    swing: 0.42,
+    kick: { octaves: 6, decay: 0.4, volume: -3 },
+    snare: { noiseDecay: 0.16, noiseHighpass: 1000, noiseVolume: -13, toneHz: 180, toneVolume: -15 },
+    hat: { decay: 0.04, volume: -30, hz: 250, resonance: 3500 },
+    bass: { wave: 'sine', baseFrequency: 60, filterOctaves: 1, q: 1, distortion: 0.15, release: 0.3, volume: -4 },
+    keys: { spread: 15, attack: 0.02, release: 0.9, lowpass: 2200, reverbWet: 0.22, reverbDecay: 1.6, duckDb: -4, volume: -23 },
+    melody: { wave: 'square', attack: 0.02, release: 0.4, lowpass: 2800, vibratoHz: 4.5, vibratoDepth: 0.1, delayWet: 0.2, delayFeedback: 0.3, reverbSend: 0.2, volume: -20 },
+  },
 };
+
+/** Live on/off switches for the Studio panel: each one bypasses a production tool so the listener can hear what it does. All on by default. */
+export interface StudioState {
+  /** EQ, compressor and limiter on the master bus */
+  master: boolean;
+  /** Swing, +-8 ms timing wobble and velocity variation */
+  humanize: boolean;
+  /** Keys dipping under the kick */
+  ducking: boolean;
+  /** Reverb send on keys and melody, and the melody's echo */
+  sends: boolean;
+  /** Keys left and melody right (off: both centered) */
+  stereo: boolean;
+}
+export type StudioKey = keyof StudioState;
+/** A fixed velocity for every hit when Humanize is off: no accents, no ghost notes, no agent dynamics. */
+const FLAT_VELOCITY = 0.8;
+/** Short ramp for every Studio switch, so toggling never clicks. */
+const STUDIO_RAMP_S = 0.04;
 
 export interface Rig {
   /** Configure every synth and effect for a preset. The delay time follows the tempo: pass the bpm when the transport is about to change (live steering), otherwise the transport's current bpm is used. Everything is applied at once; only the reverb tail regenerates afterwards. */
   applyPreset(preset: SoundPreset, bpm?: number): Promise<void>;
+  /** Studio switches (see StudioState). Changes ramp over ~40 ms and never restart or retrigger anything. */
+  getStudio(): StudioState;
+  setStudio(key: StudioKey, on: boolean): void;
   /** Loads every sampled instrument (once). Resolves when all have loaded, failed or timed out; it never rejects, and failures only reach the console. */
   load(): Promise<void>;
   /** How each sampled instrument is doing (exposed for tests and debugging). */
@@ -166,10 +227,17 @@ export interface Rig {
 /** Build the whole audio graph on the current Tone context. */
 export function createRig(): Rig {
   // ---- master bus: preset lowpass -> EQ3 (flat to start with) -> compressor -> limiter -> speakers ----
-  const limiter = new Tone.Limiter(-1).toDestination();
+  // The Studio "master bus" switch crossfades between the processed path and a straight wire, so it never clicks.
+  const out = new Tone.Gain(1).toDestination();
+  const limiter = new Tone.Limiter(-1).connect(out);
   const compressor = new Tone.Compressor({ threshold: -18, ratio: 3 }).connect(limiter);
   const eq = new Tone.EQ3().connect(compressor);
-  const master = new Tone.Filter(20000, 'lowpass').connect(eq);
+  const processed = new Tone.Gain(1).connect(eq);
+  const bypass = new Tone.Gain(0).connect(out);
+  const master = new Tone.Filter(20000, 'lowpass');
+  master.connect(processed);
+  master.connect(bypass);
+  const studio: StudioState = { master: true, humanize: true, ducking: true, sends: true, stereo: true };
 
   // ---- one reverb shared by keys and melody (drums and bass never touch it) ----
   const reverb = new Tone.Reverb({ decay: 2.5, wet: 1 }).connect(master);
@@ -327,12 +395,24 @@ export function createRig(): Rig {
 
   /** Dip the keys by the preset's duckDb at `time`, then recover over an eighth note. */
   function duckKeys(time: number) {
-    if (settings.keys.duckDb >= 0) return;
+    if (!studio.ducking || settings.keys.duckDb >= 0) return;
     const recover = Tone.Time('8n').toSeconds();
     duck.gain.cancelScheduledValues(time);
     duck.gain.setValueAtTime(Tone.dbToGain(settings.keys.duckDb), time);
     duck.gain.linearRampToValueAtTime(1, time + recover);
   }
+
+  const jit = () => (studio.humanize ? jitter() : 0);
+
+  const flatten = (ev: StepEvents): StepEvents => ({
+    ...ev,
+    kick: ev.kick ? FLAT_VELOCITY : 0,
+    snare: ev.snare ? FLAT_VELOCITY : 0,
+    hat: ev.hat ? FLAT_VELOCITY : 0,
+    bass: ev.bass.map((n) => ({ ...n, velocity: FLAT_VELOCITY })),
+    keys: ev.keys.map((c) => ({ ...c, velocity: FLAT_VELOCITY })),
+    melody: ev.melody.map((n) => ({ ...n, velocity: FLAT_VELOCITY })),
+  });
 
   /** A bad note from an agent must never take the transport down, so every trigger is guarded. */
   const safely = (what: string, fn: () => void) => {
@@ -351,6 +431,27 @@ export function createRig(): Rig {
       return current;
     },
 
+    getStudio: () => ({ ...studio }),
+    setStudio(key, on) {
+      studio[key] = on;
+      const ramp = STUDIO_RAMP_S;
+      if (key === 'master') {
+        processed.gain.rampTo(on ? 1 : 0, ramp);
+        bypass.gain.rampTo(on ? 0 : 1, ramp);
+      } else if (key === 'sends') {
+        keysSend.gain.rampTo(on ? settings.keys.reverbWet : 0, ramp);
+        melodySend.gain.rampTo(on ? settings.melody.reverbSend : 0, ramp);
+        delay.wet.rampTo(on ? settings.melody.delayWet : 0, ramp);
+      } else if (key === 'stereo') {
+        keysPan.pan.rampTo(on ? -0.2 : 0, ramp);
+        melodyPan.pan.rampTo(on ? 0.2 : 0, ramp);
+      } else if (key === 'humanize') {
+        Tone.getTransport().swing = on ? settings.swing : 0;
+      } else if (key === 'ducking' && !on) {
+        duck.gain.cancelScheduledValues(Tone.now());
+        duck.gain.rampTo(1, ramp); // let go of a dip that is in progress
+      }
+    },
     load: loadAll,
     sampleStates: () => ({ drums808: slots.drums808.state, drumsRock: slots.drumsRock.state, ep: slots.ep.state, piano: slots.piano.state }),
 
@@ -372,8 +473,13 @@ export function createRig(): Rig {
       hat.set({ envelope: { decay: p.hat.decay }, resonance: p.hat.resonance });
       hat.volume.value = p.hat.volume;
 
+      bass.oscillator.type = p.bass.wave as never;
+      if (p.bass.wave === 'fatsawtooth') {
+        const osc = bass.oscillator as unknown as { spread: number; count: number };
+        osc.spread = p.bass.spread ?? 30; // the two saws pull against each other: the reese
+        osc.count = 2;
+      }
       bass.set({
-        oscillator: { type: p.bass.wave },
         envelope: { release: p.bass.release },
         filter: { Q: p.bass.q },
         filterEnvelope: { baseFrequency: p.bass.baseFrequency, octaves: p.bass.filterOctaves },
@@ -389,11 +495,11 @@ export function createRig(): Rig {
       keysSampleGain.gain.value = Tone.dbToGain(p.keys.volume); // sampled keys sit at the same level as the synth they replace: no louder
       keysFilter.frequency.value = p.keys.lowpass;
       // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
-      keysSend.gain.value = p.keys.reverbWet;
-      melodySend.gain.value = p.melody.reverbSend;
+      keysSend.gain.value = studio.sends ? p.keys.reverbWet : 0;
+      melodySend.gain.value = studio.sends ? p.melody.reverbSend : 0;
       const transport = Tone.getTransport();
-      transport.swing = p.swing;
-      transport.swingSubdivision = '16n';
+      transport.swing = studio.humanize ? p.swing : 0;
+      transport.swingSubdivision = p.swingSub ?? '16n';
 
       melody.set({
         oscillator: { type: p.melody.wave },
@@ -405,7 +511,7 @@ export function createRig(): Rig {
       vibrato.depth.value = p.melody.vibratoDepth;
       delay.delayTime.value = bpm ? 30 / bpm : Tone.Time('8n').toSeconds(); // an eighth note
       delay.feedback.value = p.melody.delayFeedback;
-      delay.wet.value = p.melody.delayWet;
+      delay.wet.value = studio.sends ? p.melody.delayWet : 0;
 
       // Last, because it is the only slow part: the new decay regenerates the impulse response.
       if (reverb.decay !== p.keys.reverbDecay) {
@@ -414,7 +520,8 @@ export function createRig(): Rig {
       }
     },
 
-    play(ev, time) {
+    play(input, time) {
+      const ev = studio.humanize ? input : flatten(input); // Humanize off: every hit equally strong
       // The kick stays exactly on the grid (and the duck with it); everything else floats by up to +-8 ms.
       const dm = drumKit();
       if (ev.kick) {
@@ -423,30 +530,30 @@ export function createRig(): Rig {
         safely('duck', () => duckKeys(time));
       }
       if (ev.snare) {
-        if (dm) safely('snare sample', () => dm.inst.start({ note: dm.snare, velocity: vel127(ev.snare * DRUM_TRIM.snare), time: time + jitter() }));
+        if (dm) safely('snare sample', () => dm.inst.start({ note: dm.snare, velocity: vel127(ev.snare * DRUM_TRIM.snare), time: time + jit() }));
         else
           safely('snare', () => {
-            const t = time + jitter();
+            const t = time + jit();
             snareNoise.triggerAttackRelease('16n', t, ev.snare);
             snareTone.triggerAttackRelease(settings.snare.toneHz, '32n', t, ev.snare);
           });
       }
       if (ev.hat) {
-        if (dm) safely('hat sample', () => dm.inst.start({ note: dm.hat, velocity: vel127(ev.hat * DRUM_TRIM.hat), time: time + jitter() }));
-        else safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time + jitter(), ev.hat));
+        if (dm) safely('hat sample', () => dm.inst.start({ note: dm.hat, velocity: vel127(ev.hat * DRUM_TRIM.hat), time: time + jit() }));
+        else safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time + jit(), ev.hat));
       }
-      for (const n of ev.bass) safely('bass', () => bass.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
+      for (const n of ev.bass) safely('bass', () => bass.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
       const piano = keysKit();
       for (const c of ev.keys) {
         if (piano) {
           safely('keys sample', () => {
-            const t = time + jitter();
+            const t = time + jit();
             const duration = Tone.Time(c.dur).toSeconds();
             for (const note of c.notes) piano.start({ note, velocity: vel127(c.velocity), time: t, duration });
           });
-        } else safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jitter(), c.velocity));
+        } else safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jit(), c.velocity));
       }
-      for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
+      for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
     },
 
     silence() {

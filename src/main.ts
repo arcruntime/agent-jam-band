@@ -558,7 +558,7 @@ async function runStage<T>(s: Session, who: PartName, n: number, earlier: object
     state: snapshot,
     ...earlier,
     memory: { sessionId: s.id, block: n, section: { name: slot.section, startBar: planned.sectionStartBar } },
-    plan: { section: slot.section, sectionBar: slot.sectionBar, sectionBars: slot.sectionBars, chords: slot.chords },
+    plan: { section: slot.section, sectionBar: slot.sectionBar, sectionBars: slot.sectionBars, chords: slot.chords, preset: s.target.preset },
   };
   const reply = await post<AgentReply<T>>(`/api/agents/${who}`, body, s.abort.signal);
   if (session !== s || s.epoch !== epoch) throw new Error('stopped'); // stopped, or steered away from while this was being written
@@ -742,6 +742,10 @@ function tick(s: Session, time: number) {
   if (pos % s.stepsPerBar === 0) {
     s.bar = pos / s.stepsPerBar;
     Tone.getDraw().schedule(() => renderStatus(s), time);
+    // A build sweeps the vox's filter open bar by bar; in any other section it is fully open.
+    const slot = s.plans.get(s.current.n)?.slot;
+    const open = slot?.section === 'build' ? (slot.sectionBar - 1 + s.bar + 1) / slot.sectionBars : 1;
+    getRig().voxOpen(open, time, s.stepsPerBar * Tone.Time('16n').toSeconds());
   }
 
   // Beat counter: on every beat of the bar (a quarter note in x/4, an eighth in x/8), timed to the audio like everything else.

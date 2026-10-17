@@ -5,6 +5,7 @@
 import { sectionFromText, type SectionName } from '../shared/arrangement.js';
 import { TIME_SIGNATURES, type Meter, type TimeSignature } from '../shared/meter.js';
 import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
+import { VOX_LIMITS, fitRegister, voxRegister, voxWindows, type VoxStyle, type VoxWindow } from '../shared/vox.js';
 import type { BassBar, ChordBar, ConductorOverrides, ConductorSettings, DrumBar, JamBar, JamState, MelodyBar, VoxBar } from '../shared/types.js';
 
 // ---------- Pitch helpers ----------
@@ -27,13 +28,13 @@ export function semitoneShift(fromKey: string, toKey: string): number {
   return d > 6 ? d - 12 : d;
 }
 
-function midiOf(note: string): number | null {
+export function midiOf(note: string): number | null {
   const m = /^([A-G])([#b]?)(\d)$/.exec(note);
   if (!m) return null;
   return (Number(m[3]) + 1) * 12 + PITCH_CLASS[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
 }
 
-const nameOf = (midi: number) => `${SHARP_NAMES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
+export const nameOf = (midi: number) => `${SHARP_NAMES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
 const lowestMidi = (octave: number) => (octave + 1) * 12;
 const highestMidi = (octave: number) => (octave + 1) * 12 + 11;
 
@@ -58,7 +59,7 @@ const transposeKeys = (bar: ChordBar, shift: number): ChordBar =>
 const transposeMelody = (bar: MelodyBar, shift: number): MelodyBar =>
   bar.map((n) => ({ ...n, note: transposeNames([n.note], shift, 4, 6)[0] }));
 const transposeVox = (bar: VoxBar, shift: number): VoxBar =>
-  bar.map((n) => ({ ...n, note: transposeNames([n.note], shift, 3, 5)[0] }));
+  bar.map((n) => ({ ...n, note: transposeNames([n.note], shift, 2, 7)[0] }));
 
 // ---------- Previous block ----------
 
@@ -89,45 +90,86 @@ export const previousVox = (state: JamState): VoxBar[] | null =>
 export const silentVox = (): VoxBar[] => [[], [], [], []];
 
 /**
- * The vox is a garnish, so whatever the model wrote is held to the song section's limits (this runs on every reply, fallback included): silent in the intro, a few quiet chops in the breakdown, up to 6 rising chops per bar in a build (velocity 0.7 at most) and up to 8 in a drop (0.8 at most). The vox bus itself sits below the melody's, so the vox is never louder than the melody even at those velocities.
+ * The vox is a garnish, so whatever the model wrote is held to the style's and the section's limits (this runs on every reply, fallback included): silent in the intro, and per style a number of chops a bar and a top velocity (see VOX_LIMITS in shared/vox.ts).
  * A hit with no velocity gets the cap. Too many hits are thinned evenly, not cut off at the end of the bar.
  */
-export const VOX_LIMITS: Record<SectionName, { hits: number; velocity: number }> = {
-  intro: { hits: 0, velocity: 0 },
-  build: { hits: 6, velocity: 0.7 },
-  drop: { hits: 8, velocity: 0.8 },
-  breakdown: { hits: 1, velocity: 0.5 },
-};
-export function shapeVox(bars: VoxBar[], section?: SectionName): VoxBar[] {
-  const limit = section ? VOX_LIMITS[section] : { hits: 8, velocity: 0.7 };
+export function shapeVox(bars: VoxBar[], section?: SectionName, style: VoxStyle = 'stab'): VoxBar[] {
+  const limit = section ? VOX_LIMITS[style][section] : { hits: 8, velocity: 0.8 };
   return bars.map((bar) => {
     const kept = bar.length <= limit.hits ? bar : limit.hits <= 0 ? [] : limit.hits === 1 ? [bar[0]] : Array.from({ length: limit.hits }, (_, i) => bar[Math.round((i * (bar.length - 1)) / (limit.hits - 1))]);
     return kept.map((hit) => ({ ...hit, velocity: Math.min(hit.velocity ?? limit.velocity, limit.velocity) }));
   });
 }
 
+/** The middle pitch of the melody (MIDI), or null when it has no notes. */
+export function melodyMedian(melody: MelodyBar[]): number | null {
+  const m = melody.flat().flatMap((n) => { const x = midiOf(n.note); return x === null ? [] : [x]; }).sort((a, b) => a - b);
+  return m.length ? m[Math.floor(m.length / 2)] : null;
+}
+
+/** Where the vox sings for this style, around the melody (or around C5 when there is no melody to go by). */
+export const voxRegisterFor = (style: VoxStyle, melody: MelodyBar[]) => voxRegister(style, melodyMedian(melody) ?? 72);
+
+/** Stabs are "ah" and "oh" chops, pads and the rare rock chop are "oo" (or "oh"); the vocoder may use any vowel. */
+const styleVowel = (style: VoxStyle, v: VoxBar[number]['vowel']): VoxBar[number]['vowel'] =>
+  style === 'stab' ? (v === 'ee' ? 'ah' : v === 'oo' ? 'oh' : v) : style === 'pad' || style === 'rare' ? (v === 'oh' ? 'oh' : 'oo') : v;
+
 /**
- * Chops derived straight from the melody, for when the vox has nothing of its own (the model failed or sat a drop out): every melody note is answered on the next free off-beat step with the same pitch (kept in octaves 3 to 5), cycling through the vowels. In a build only the first two answers of a bar are kept so it can still rise.
+ * Makes a vox part fit the arrangement whatever wrote it: only the windows that belong to the vox (everything else is dropped), every pitch moved by octaves into the style's register (so it never shares the melody's register), then the section's density and velocity limits.
  */
-export function chopMelody(melody: MelodyBar[], stepsPerBar: number, section?: SectionName): VoxBar[] {
-  const vowels = ['ah', 'oh', 'ee', 'oo'] as const;
-  let v = 0;
-  return melody.slice(0, 4).map((bar) => {
-    const taken = new Set(bar.map((n) => n.step));
-    const hits: VoxBar = [];
-    for (const n of bar) {
-      const step = [n.step + 2, n.step + 1, n.step + 3].find((s) => s < stepsPerBar && !taken.has(s));
-      if (step === undefined) continue;
-      taken.add(step);
-      let midi = midiOf(n.note);
-      if (midi === null) continue;
-      while (midi > 83) midi -= 12;
-      while (midi < 48) midi += 12;
-      hits.push({ step, note: nameOf(midi), vowel: vowels[v++ % 4], dur: '16n' });
-    }
-    hits.sort((a, b) => a.step - b.step);
-    return section === 'build' ? hits.slice(0, 2) : hits;
+export function conformVox(bars: VoxBar[], o: { section?: SectionName; style: VoxStyle; stepsPerBar: number; melody: MelodyBar[] }): VoxBar[] {
+  const windows = o.section ? voxWindows(o.style, o.section, o.stepsPerBar) : null;
+  const reg = voxRegisterFor(o.style, o.melody);
+  const placed = bars.map((bar, i) =>
+    bar
+      .filter((h) => !windows || windows.some((w) => w.bar === i && h.step >= w.from && h.step < w.to))
+      .map((h) => {
+        const m = midiOf(h.note);
+        return { ...h, ...(m === null ? {} : { note: nameOf(fitRegister(m, reg)) }), vowel: styleVowel(o.style, h.vowel) };
+      }),
+  );
+  return shapeVox(placed, o.section, o.style);
+}
+
+const DUR_STEPS: Record<string, number> = { '16n': 1, '8n': 2, '8n.': 3, '4n': 4, '4n.': 6, '2n': 8, '2n.': 12, '1m': 16 };
+
+/**
+ * Leaves the vox's windows empty in the melody: notes that start inside a window are dropped, and a note that would ring into one is shortened to end where it starts. This runs on every melody reply, fallback included.
+ */
+export function shapeMelody(bars: MelodyBar[], windows: VoxWindow[]): MelodyBar[] {
+  if (!windows.length) return bars;
+  const SHORT = ['1m', '2n', '4n', '8n', '16n'] as const;
+  return bars.map((bar, i) => {
+    const mine = windows.filter((w) => w.bar === i);
+    if (!mine.length) return bar;
+    return bar
+      .filter((n) => !mine.some((w) => n.step >= w.from && n.step < w.to))
+      .map((n) => {
+        const next = mine.filter((w) => w.from > n.step).sort((a, b) => a.from - b.from)[0];
+        if (!next) return n;
+        const room = next.from - n.step;
+        if ((DUR_STEPS[n.dur] ?? 4) <= room) return n;
+        return { ...n, dur: SHORT.find((d) => DUR_STEPS[d] <= room) ?? '16n' };
+      });
   });
+}
+
+/**
+ * Chops derived straight from the melody, for when the vox has nothing of its own (the model failed or wrote nothing in a section where it should play): the melody's own pitches, sung in the vox's windows with the style's rhythm and vowels. Stabs go on the off-beats and syncopations, the other styles sing one held vowel at the start of each window. The caller moves them into the register.
+ */
+export function chopMelody(melody: MelodyBar[], stepsPerBar: number, section: SectionName, style: VoxStyle = 'stab'): VoxBar[] {
+  const pool = melody.flat().map((n) => n.note);
+  const out: VoxBar[] = [[], [], [], []];
+  if (!pool.length) return out;
+  let k = 0;
+  for (const w of voxWindows(style, section, stepsPerBar)) {
+    const steps = style === 'stab' ? Array.from({ length: w.to - w.from }, (_, i) => w.from + i).filter((s) => s % 4 === 2 || s % 8 === 7) : [w.from];
+    for (const step of steps) {
+      const vowel = style === 'stab' ? (k % 2 ? 'oh' : 'ah') : style === 'vocoder' ? (['ah', 'oh', 'oo'] as const)[k % 3] : 'oo';
+      out[w.bar].push({ step, note: pool[k++ % pool.length], vowel, dur: style === 'stab' ? '16n' : '2n' });
+    }
+  }
+  return out;
 }
 
 /** Make sure every bar with a kick has a bass note on its first kick step, like the bass agent's own rule. */

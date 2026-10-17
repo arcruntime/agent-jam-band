@@ -30,6 +30,8 @@ export interface BlockPlan {
   sectionBar: number;
   sectionBars: number;
   chords: string[];
+  /** The sound preset the block is written for (it decides the vox style) */
+  preset?: string;
 }
 
 /** One block of the arrangement, in song order. */

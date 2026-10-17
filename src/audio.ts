@@ -19,7 +19,8 @@ import { DrumMachine, ElectricPiano, SplendidGrandPiano, getDrumMachineNames } f
 import * as Tone from 'tone';
 import type { SoundPreset } from '../shared/presets';
 import type { StepEvents } from './steps';
-import { createVoxVoice, MAX_CHOP_S } from './vox';
+import { createVoxVoice } from './vox';
+import { VOX_STYLE, type VoxStyle } from '../shared/vox';
 
 type Wave = 'sawtooth' | 'square' | 'triangle' | 'sine' | 'fatsawtooth';
 
@@ -188,10 +189,13 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
   },
 };
 
-/** The vox sits this far under the melody's own level (dB), on top of the server capping its velocity below the melody's. Chosen by measuring with the same hit on both: see the vox tests. */
-const VOX_BELOW_MELODY_DB = 4;
-/** Crusher depth per preset: gritty on the electronic ones, gentle on the warm ones. */
-const VOX_BITS: Record<SoundPreset, number> = { lofi: 6, futurebass: 5, house: 5, rock: 7, ambient: 7, dnb: 5, jazz: 8, hiphop: 6 };
+/** Where the vox bus sits relative to the melody's own level (dB), per preset (each melody chain has its own level), and how much of it feeds the shared reverb by style. Chosen by measuring a vox chop against a melody note on every preset (see the vox tests): the short bright stabs peak about 3 dB under the melody, the vocoder about 5 dB, the pads about 6 dB. */
+const VOX_LEVEL_DB: Record<SoundPreset, number> = { futurebass: -5.4, house: -2.9, dnb: -5.0, hiphop: -6.1, lofi: -5.8, jazz: -11.0, ambient: -9.9, rock: -6.0 };
+const VOX_REVERB_SEND: Record<VoxStyle, number> = { stab: 0.22, vocoder: 0.14, pad: 0.35, rare: 0.35 };
+/** How much the kick dips the vox, as a share of the keys' own duck (a gentle sidechain). */
+const VOX_DUCK_SHARE = 0.6;
+/** Crusher depth per preset, more for the glitchy electronic presets: 5 bits is audibly grainy, 8 is subtle, 16 is off. */
+const VOX_BITS: Record<SoundPreset, number> = { futurebass: 5, house: 5, dnb: 6, hiphop: 7, lofi: 8, jazz: 16, ambient: 16, rock: 16 };
 
 /** Live on/off switches for the Studio panel: each one bypasses a production tool so the listener can hear what it does. All on by default. */
 export interface StudioState {
@@ -237,6 +241,8 @@ export interface Rig {
   readonly recording: boolean;
   /** How many chops were really triggered since the page opened, and the last one (exposed for tests and debugging). */
   voxStats(): { triggered: number; lastNote: string | null; lastVowel: string | null; lastVelocity: number };
+  /** Open the vox's filter: 0 is mostly closed, 1 is the style's own cutoff. The song calls it once a bar so a build sweeps the vox open. */
+  voxOpen(open: number, time: number, rampSeconds: number): void;
   /** The gate and level of the vox (exposed for tests): its gain is 0 when the Studio vox switch is off. */
   readonly voxBus: Tone.Gain;
   readonly preset: SoundPreset | null;
@@ -325,14 +331,18 @@ export function createRig(): Rig {
 
   // ---- vox: robot chops -> gate/level -> pan (centered) -> master, and the gate output also feeds the reverb send ----
   const voxPan = new Tone.Panner(0).connect(master);
-  const voxBus = new Tone.Gain(Tone.dbToGain(PRESETS.lofi.melody.volume - VOX_BELOW_MELODY_DB));
+  const voxBus = new Tone.Gain(Tone.dbToGain(PRESETS.lofi.melody.volume + VOX_LEVEL_DB.lofi));
   voxBus.connect(voxPan);
   voxBus.connect(voxSend);
-  const voxVoice = createVoxVoice({ bits: VOX_BITS.lofi });
+  // The kick ducks the vox a little, like the keys (see duckKeys).
+  const voxDuck = new Tone.Gain(1).connect(voxBus);
+  const voxVoice = createVoxVoice({ bits: VOX_BITS.lofi, style: VOX_STYLE.lofi });
   const voxCount = { triggered: 0, lastNote: null as string | null, lastVowel: null as string | null, lastVelocity: 0 };
-  voxVoice.output.connect(voxBus);
+  voxVoice.output.connect(voxDuck);
   /** Where the vox bus sits for the current preset: under the melody, or shut when the Studio switch is off. */
-  const voxLevel = () => (studio.vox ? Tone.dbToGain(settings.melody.volume - VOX_BELOW_MELODY_DB) : 0);
+  const voxStyle = (): VoxStyle => VOX_STYLE[current ?? 'lofi'];
+  const voxLevel = () => (studio.vox ? Tone.dbToGain(settings.melody.volume + VOX_LEVEL_DB[current ?? 'lofi']) : 0);
+  const voxSendLevel = () => (studio.sends ? VOX_REVERB_SEND[voxStyle()] : 0);
 
   // ---- sampled instruments: they join the same chains as the synths they replace ----
   // Drums go dry and centered into the master bus. Keys go through a gentle lowpass into the same duck gain (so ducking, pan and the shared reverb send all still apply).
@@ -433,6 +443,9 @@ export function createRig(): Rig {
     duck.gain.cancelScheduledValues(time);
     duck.gain.setValueAtTime(Tone.dbToGain(settings.keys.duckDb), time);
     duck.gain.linearRampToValueAtTime(1, time + recover);
+    voxDuck.gain.cancelScheduledValues(time);
+    voxDuck.gain.setValueAtTime(Tone.dbToGain(settings.keys.duckDb * VOX_DUCK_SHARE), time);
+    voxDuck.gain.linearRampToValueAtTime(1, time + recover);
   }
 
   const jit = () => (studio.humanize ? jitter() : 0);
@@ -490,6 +503,7 @@ export function createRig(): Rig {
     get recording() {
       return recording;
     },
+    voxOpen: (open, time, rampSeconds) => voxVoice.setOpen(open, time, rampSeconds),
     voxStats: () => ({ ...voxCount }),
     get voxBus() {
       return voxBus;
@@ -508,7 +522,7 @@ export function createRig(): Rig {
       } else if (key === 'sends') {
         keysSend.gain.rampTo(on ? settings.keys.reverbWet : 0, ramp);
         melodySend.gain.rampTo(on ? settings.melody.reverbSend : 0, ramp);
-        voxSend.gain.rampTo(on ? settings.melody.reverbSend : 0, ramp);
+        voxSend.gain.rampTo(on ? voxSendLevel() : 0, ramp);
         delay.wet.rampTo(on ? settings.melody.delayWet : 0, ramp);
       } else if (key === 'stereo') {
         keysPan.pan.rampTo(on ? -0.2 : 0, ramp);
@@ -567,9 +581,9 @@ export function createRig(): Rig {
       // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
       keysSend.gain.value = studio.sends ? p.keys.reverbWet : 0;
       melodySend.gain.value = studio.sends ? p.melody.reverbSend : 0;
-      voxSend.gain.value = studio.sends ? p.melody.reverbSend : 0;
+      voxSend.gain.value = voxSendLevel();
       voxBus.gain.value = voxLevel();
-      voxVoice.setBits(VOX_BITS[preset]);
+      voxVoice.setStyle(VOX_STYLE[preset], VOX_BITS[preset]);
       const transport = Tone.getTransport();
       transport.swing = studio.humanize ? p.swing : 0;
       transport.swingSubdivision = p.swingSub ?? '16n';
@@ -629,7 +643,7 @@ export function createRig(): Rig {
       for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
       // Vox off: nothing is triggered at all (the gate is shut as well, so a chop already ringing fades out).
       if (studio.vox) for (const n of ev.vox ?? []) safely('vox', () => {
-        voxVoice.sing(n.note, n.vowel, Math.min(MAX_CHOP_S, Tone.Time(n.dur).toSeconds()), time + jit(), n.velocity);
+        voxVoice.sing(n.note, n.vowel, Tone.Time(n.dur).toSeconds(), time + jit(), n.velocity);
         voxCount.triggered++;
         voxCount.lastNote = n.note;
         voxCount.lastVowel = n.vowel;

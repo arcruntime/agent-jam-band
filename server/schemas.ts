@@ -126,7 +126,7 @@ export const voxBarSchema = (steps: number) =>
     .array(
       z
         .object({ step: stepIn(steps), note: pitch, vowel, dur, velocity })
-        .refine((n) => octave(n.note) >= 3 && octave(n.note) <= 5, { message: 'vox notes must be in octaves 3 to 5', path: ['note'] }),
+        .refine((n) => octave(n.note) >= 2 && octave(n.note) <= 7, { message: 'vox notes must be in octaves 2 to 7', path: ['note'] }),
     )
     .max(MAX_VOX_HITS, `at most ${MAX_VOX_HITS} chops per bar`)
     .superRefine((hits, ctx) => {
@@ -204,6 +204,8 @@ export const blockPlanSchema = z.object({
   sectionBar: z.number().int().min(1).max(64),
   sectionBars: z.number().int().min(4).max(64),
   chords: z.array(z.string().trim().max(12)).length(BARS),
+  /** The sound preset this block is written for; it decides the vox style. Optional and lenient: without it the vox uses the default style. */
+  preset: z.string().max(20).optional(),
 });
 
 export const conductorRequestSchema = z.object({

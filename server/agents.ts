@@ -3,7 +3,8 @@ import type OpenAI from 'openai';
 import type { z } from 'zod';
 import { BLOCK_BARS, defaultArrangement, parseChord, sanitizeArrangement, sectionFromText, sectionNameOf, type BlockPlan, type SectionName } from '../shared/arrangement.js';
 import { meterOf, type Meter } from '../shared/meter.js';
-import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
+import { SOUND_PRESETS, isSoundPreset, type SoundPreset } from '../shared/presets.js';
+import { VOX_BRIEF, VOX_SECTION, VOX_STYLE, voxWindows, type VoxStyle, type VoxWindow } from '../shared/vox.js';
 import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar, TokenUsage, VoxBar } from '../shared/types.js';
 import { config } from './config.js';
 import {
@@ -22,9 +23,12 @@ import {
   previousKeys,
   previousMelody,
   previousVox,
-  shapeVox,
-  silentVox,
+  conformVox,
   chopMelody,
+  nameOf,
+  shapeMelody,
+  silentVox,
+  voxRegisterFor,
 } from './fallback.js';
 import { getClient, reasoningParams } from './llm.js';
 import { recall, remember, type BandMemoryItem, type MemoryAgent, type MemoryCtx } from './memory.js';
@@ -124,6 +128,7 @@ const melodySystem = (m: Meter) =>
     `You are the MELODY player in ${BAND}. You write one lead line at a time, as JSON, on a sixteenth-note step grid.`,
     gridParagraph(m),
     `You are given the drummer's, the bassist's and the keys player's NEXT 4 BARS. Read all three first. Write a singable lead line in the key: put chord tones from the keys part on the downbeat and on the meter's group starts, use passing tones between them, repeat a short motif and vary it, and leave rests (an empty array is a rest bar) so the part breathes. Play single notes only.`,
+    `Sometimes a vox player answers you. If "rest_for_vox" is given, those steps of those bars belong to the vox: play nothing that starts inside them, and let a note end before the window starts. Play your phrase in the other bars and on the other steps, and leave a clear gap so the vox's reply can be heard (this is call and response).`,
     MEMORY_PARAGRAPH,
     STEER_PARAGRAPH,
     SECTION_PARAGRAPH,
@@ -132,19 +137,19 @@ const melodySystem = (m: Meter) =>
     `Rules: "bars" has exactly 4 arrays, one per bar; a bar may be empty but there must be at least 3 notes across the 4 bars. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic). note is scientific pitch notation such as "E5" or "F#4", in octaves 4 to 6 (C4 to C6). dur is one of ${DUR_LIST}. Use at most 12 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
-const voxSystem = (m: Meter) =>
+const voxSystem = (m: Meter, style: VoxStyle) =>
   [
-    `You are the VOX player in ${BAND}. You write robot vocal chops, as JSON, on a sixteenth-note step grid: short vowel-like hits that a synth voice sings through filters, like a robot choir (no words, only vowels).`,
+    `You are the VOX player in ${BAND}. You write robot vocal chops, as JSON, on a sixteenth-note step grid: vowel-like hits that a synth voice sings through filters (no words, only vowels). Your style for this genre is "${style}": ${VOX_BRIEF[style]}`,
     gridParagraph(m),
-    `You are given the drummer's, the keys player's and the melody player's NEXT 4 BARS. Read them first. Chop the melody: answer or echo its notes with short vocal hits (the same pitches, or a chord tone from the keys part), mostly on off-beat steps and in the gaps where the melody rests, so you never crowd the lead. Every hit has a "vowel", exactly one of "ah" (open and wide), "oh" (round), "ee" (bright and tight) or "oo" (dark and soft): "ah" and "oh" suit longer or stronger hits, "ee" suits quick, high or accented ones and "oo" suits soft ones. Vary the vowels so the line seems to speak. Keep hits short ("16n" and "8n" mostly, "4n" at most for a held sigh).`,
-    `You sit under the melody and never cover it: keep velocities between 0.5 and 0.8, and leave its notes to ring. How busy you are depends on the section: in a build you play 2 to 6 chops a bar and climb, in a drop you play 5 to 8 chops in every bar so the hook is clearly heard, and in a breakdown you play at most one soft held vowel a bar. An empty array is a rest bar, which is for intros and breakdowns, not for builds and drops.`,
+    `You are given the drummer's, the keys player's and the melody player's NEXT 4 BARS. Read them first. The melody and you take turns (call and response): "your_windows" lists the bars and the steps of them where only you play, and the melody rests there. Write hits ONLY inside your windows, and nothing outside them. Sing the melody's own pitches or a chord tone from the keys part, in the "register" given (the melody keeps its own register, so you never share it): any octave is fine, it will be moved into your register. Every hit has a "vowel", exactly one of "ah" (open and wide), "oh" (round), "ee" (bright and tight) or "oo" (dark and soft).`,
+    `You never cover the melody: keep velocities between 0.5 and 0.8. An empty array is a rest bar, which is normal for any bar without a window.`,
     MEMORY_PARAGRAPH,
     `You are especially good at calling back a melody motif from band_memory as a chop: keep its pitches, change the rhythm and give each hit a vowel, then set "echoes" to its id.`,
     STEER_PARAGRAPH,
     SECTION_PARAGRAPH,
     NOTE_VELOCITY,
-    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you chopped and why>", ${ECHO_SHAPE}, "bars": [[{"step": 2, "note": "E4", "vowel": "ah", "dur": "16n"}, ...], [...], [...], [...]]}`,
-    `Rules: "bars" has exactly 4 arrays, one per bar, and a bar may be empty. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic, one chop per step). note is scientific pitch notation such as "E4" or "G#4", in octaves 3 to 5 (C3 to B5), in the key. vowel is exactly one of "ah", "oh", "ee" or "oo". dur is one of ${DUR_LIST}. Use at most 8 chops per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you chopped and why>", ${ECHO_SHAPE}, "bars": [[{"step": 10, "note": "E6", "vowel": "ah", "dur": "16n"}, ...], [...], [...], [...]]}`,
+    `Rules: "bars" has exactly 4 arrays, one per bar, and a bar may be empty. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic, one chop per step). note is scientific pitch notation such as "E4" or "G#5", in the key. vowel is exactly one of "ah", "oh", "ee" or "oo". dur is one of ${DUR_LIST}. Use at most 8 chops per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
 /** The preset menu the conductor chooses from (it must pick the closest one; there is no other sound to choose). */
@@ -514,8 +519,15 @@ export async function keysAgent(state: JamState, drums: DrumBar[], bass: BassBar
   );
 }
 
+/** The vox style the block is written for (from its preset; the default preset's style when none was sent) and the windows that belong to the vox in it. */
+function voxPlanOf(plan: BlockPlan | undefined, stepsPerBar: number): { style: VoxStyle; windows: VoxWindow[] } {
+  const style = plan?.preset && isSoundPreset(plan.preset) ? VOX_STYLE[plan.preset] : VOX_STYLE.lofi;
+  return { style, windows: plan ? voxWindows(style, plan.section, stepsPerBar) : [] };
+}
+
 export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassBar[], keys: ChordBar[], ctx?: Ctx, plan?: BlockPlan): Promise<AgentReply<MelodyBar>> {
   const m = meterOf(state.timeSignature);
+  const { windows } = voxPlanOf(plan, m.stepsPerBar);
   const user = JSON.stringify({
     song: song(state, m),
     ...planView(plan, 'melody'),
@@ -523,53 +535,67 @@ export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassB
     bass_next_4_bars: bass,
     keys_next_4_bars: keys,
     previous_melody_bars: history(state, 'melody'),
+    ...(windows.length ? { rest_for_vox: windows.map((w) => ({ bar: w.bar + 1, steps: `${w.from}-${w.to - 1}` })) } : {}),
     band_memory: await recallFor(ctx, 'melody'),
     task: 'Write the next 4 bars of melody over the chords, bass and drums above.',
   });
   return guarded<MelodyBar>(
     'melody',
     ctx,
-    () => runAgent('melody', melodySystem(m), user, melodyReplySchema(m.stepsPerBar)),
+    async () => {
+      const out = await runAgent('melody', melodySystem(m), user, melodyReplySchema(m.stepsPerBar));
+      // The vox's windows are left empty whatever the model wrote.
+      return { ...out, data: { ...out.data, bars: shapeMelody(out.data.bars, windows) } };
+    },
     () => {
       const previous = previousMelody(state);
-      return previous ? { bars: previous, source: 'previous block' } : { bars: defaultMelody(state.key), source: 'built-in pattern' };
+      return { bars: shapeMelody(previous ?? defaultMelody(state.key), windows), source: previous ? 'previous block' : 'built-in pattern' };
     },
   );
 }
 
 export async function voxAgent(state: JamState, drums: DrumBar[], keys: ChordBar[], melody: MelodyBar[], ctx?: Ctx, plan?: BlockPlan): Promise<AgentReply<VoxBar>> {
-  // The intro is silent by design, so there is nothing to ask the model and nothing to remember.
-  if (plan?.section === 'intro') return { why: '', bars: silentVox(), latencyMs: 0 };
   const m = meterOf(state.timeSignature);
+  const { style, windows } = voxPlanOf(plan, m.stepsPerBar);
+  // Nothing to ask when the vox has no window in this block (the whole intro, a rock build, a style's quiet bars): no model call, no tokens, nothing remembered.
+  if (!plan || !windows.length) {
+    console.log(`[vox] section=${plan?.section ?? '-'} style=${style} no window: silent`);
+    return { why: '', bars: silentVox(), latencyMs: 0 };
+  }
+  const reg = voxRegisterFor(style, melody);
+  const view = planView(plan, 'vox') as { section?: { what_to_play?: string } };
+  if (view.section) view.section.what_to_play = VOX_SECTION[style][plan.section];
   const user = JSON.stringify({
     song: song(state, m),
-    ...planView(plan, 'vox'),
+    ...view,
+    vox_style: { name: style, brief: VOX_BRIEF[style] },
+    your_windows: windows.map((w) => ({ bar: w.bar + 1, steps: `${w.from}-${w.to - 1}` })),
+    register: { lowest: nameOf(reg.low), highest: nameOf(reg.high) },
     drums_next_4_bars: drumsView(drums),
     keys_next_4_bars: keys,
     melody_next_4_bars: melody,
     previous_vox_bars: history(state, 'vox'),
     band_memory: await recallFor(ctx, 'vox'),
-    task: 'Write the next 4 bars of robot vocal chops over the melody, chords and drums above.',
+    task: 'Write the next 4 bars of robot vocal chops: only inside your windows, in your register, answering the melody.',
   });
+  const fit = (bars: VoxBar[]) => conformVox(bars, { section: plan.section, style, stepsPerBar: m.stepsPerBar, melody });
   const reply = await guarded<VoxBar>(
     'vox',
     ctx,
     async () => {
-      const out = await runAgent('vox', voxSystem(m), user, voxReplySchema(m.stepsPerBar));
-      // Held to the section's limits whatever the model wrote (see shapeVox).
-      // A build or drop where the model wrote nothing at all still gets the melody chopped: those sections are where the vox is meant to be heard.
-      const wrote = out.data.bars.some((b) => b.length > 0);
-      const bars = !wrote && (plan?.section === 'drop' || plan?.section === 'build') ? chopMelody(melody, m.stepsPerBar, plan.section) : out.data.bars;
-      return { ...out, data: { ...out.data, bars: shapeVox(bars, plan?.section) } };
+      const out = await runAgent('vox', voxSystem(m, style), user, voxReplySchema(m.stepsPerBar));
+      // Windows, register and limits are enforced whatever the model wrote. If that leaves nothing in a window it should have used, the melody is chopped instead.
+      let bars = fit(out.data.bars);
+      if (!bars.some((b) => b.length)) bars = fit(chopMelody(melody, m.stepsPerBar, plan.section, style));
+      return { ...out, data: { ...out.data, bars } };
     },
     () => {
       const previous = previousVox(state);
-      const loud = plan?.section === 'drop' || plan?.section === 'build';
-      const bars = previous && previous.some((b) => b.length) ? previous : loud ? chopMelody(melody, m.stepsPerBar, plan.section) : silentVox();
-      return { bars: shapeVox(bars, plan?.section), source: bars === previous ? 'previous block' : loud ? 'melody chops' : 'silence' };
+      const bars = fit(previous && previous.some((b) => b.length) ? previous : chopMelody(melody, m.stepsPerBar, plan.section, style));
+      return { bars, source: 'melody chops' };
     },
   );
-  // One line per block so a quiet vox is easy to explain: what section it was, how many chops each bar got and whether they came from the model.
-  console.log(`[vox] section=${plan?.section ?? '-'} hits/bar=${JSON.stringify(reply.bars.map((b) => b.length))} velocity<=${Math.max(0, ...reply.bars.flat().map((h) => h.velocity ?? 0)).toFixed(2)} ${reply.fallback ? 'FALLBACK' : 'model'} ${reply.latencyMs}ms`);
+  // One line per block so a quiet vox is easy to explain: the style, the section, how many chops each bar got and whether they came from the model.
+  console.log(`[vox] section=${plan.section} style=${style} windows=${JSON.stringify(windows.map((w) => [w.bar + 1, w.from, w.to - 1]))} hits/bar=${JSON.stringify(reply.bars.map((b) => b.length))} ${reply.fallback ? 'FALLBACK' : 'model'} ${reply.latencyMs}ms`);
   return reply;
 }

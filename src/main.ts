@@ -1,35 +1,48 @@
 import './style.css';
 import * as Tone from 'tone';
-import type { AgentReply, BassBar, DrumBar, JamState } from '../shared/types';
+import type {
+  AgentReply,
+  BassBar,
+  BlockParts,
+  ChordBar,
+  ConductorOverrides,
+  ConductorReply,
+  DrumBar,
+  JamState,
+  MelodyBar,
+} from '../shared/types';
+import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
+import { getRig } from './audio';
 import { Pipeline, type Block } from './pipeline';
+import { stepEvents } from './steps';
 
-const TEMPO = 90;
-const KEY = 'A minor';
-const STEPS_PER_BAR = 16;
 const BARS_PER_CHUNK = 4;
-const CHUNK_STEPS = STEPS_PER_BAR * BARS_PER_CHUNK;
 const DEFAULT_VIBE = 'dusty late-night lo-fi, sleepy but groovy';
+const BPM_MIN = 60;
+const BPM_MAX = 180;
 /** Finished blocks kept queued ahead of the one that is playing: 2 blocks = 8 bars. */
 const BUFFER_BLOCKS = 2;
 /** Only the recent tail of the shared state is sent to the agents; they read the last 8 bars anyway. */
 const STATE_TAIL_BARS = 16;
 
 /** Four bars written together by the band. */
-type Chunk = Block<DrumBar[], BassBar[]>;
+type Chunk = Block<BlockParts>;
+type PartName = keyof BlockParts;
+type Who = 'conductor' | PartName | 'system';
+type Mode = 'idle' | 'loading' | 'playing';
 
 /** Everything that belongs to one Start..Stop run. Replaced on every Start so stale async work can detect it was cancelled. */
 interface Session {
   state: JamState;
-  pipeline: Pipeline<DrumBar[], BassBar[]>;
+  /** Sixteenth-note steps per bar, set from the conductor's time signature */
+  stepsPerBar: number;
+  pipeline: Pipeline<BlockParts>;
   current: Chunk | null;
   step: number;
   bar: number;
   loopWarned: boolean;
   waitFirst?: { resolve: () => void; reject: (err: Error) => void };
 }
-
-type Who = 'drums' | 'bass' | 'system';
-type Mode = 'idle' | 'loading' | 'playing';
 
 // ---------- UI ----------
 
@@ -38,19 +51,36 @@ app.innerHTML = `
   <main>
     <header>
       <h1>Agent Jam Band</h1>
-      <p class="sub">Two AI agents, one groove. The bassist reads the drummer's bars and locks to the kick.</p>
+      <p class="sub">A conductor sets the tempo, key and meter. Then drums, bass, keys and melody are four AI agents, each reading the ones before it.</p>
     </header>
-    <div class="layout">
-      <section class="panel player">
+    <section class="panel bar">
+      <div class="field vibe">
         <label for="vibe">Vibe</label>
         <input id="vibe" type="text" maxlength="300" placeholder="${DEFAULT_VIBE}" autocomplete="off" />
-        <div class="row">
-          <button id="start">Start</button>
-          <button id="stop" class="ghost" disabled>Stop</button>
-        </div>
+      </div>
+      <div class="field">
+        <label for="bpm">BPM</label>
+        <input id="bpm" type="number" inputmode="numeric" min="${BPM_MIN}" max="${BPM_MAX}" step="1" placeholder="Auto" title="Blank = the conductor picks" />
+      </div>
+      <div class="field">
+        <label for="meter">Time</label>
+        <select id="meter" title="Auto = the conductor picks">
+          <option value="">Auto</option>
+          ${TIME_SIGNATURES.map((t) => `<option value="${t}">${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="actions">
+        <button id="start">Start</button>
+        <button id="stop" class="ghost" disabled>Stop</button>
+      </div>
+    </section>
+    <div class="layout">
+      <section class="panel player">
         <dl class="meta">
-          <div><dt>Tempo</dt><dd>${TEMPO} BPM</dd></div>
-          <div><dt>Key</dt><dd>${KEY}</dd></div>
+          <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
+          <div><dt>Key</dt><dd id="metaKey">–</dd></div>
+          <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
+          <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
         </dl>
         <p id="now" class="now">Press Start to hear the band.</p>
         <p id="next" class="next"></p>
@@ -64,15 +94,21 @@ app.innerHTML = `
 `;
 
 const vibeEl = document.querySelector<HTMLInputElement>('#vibe')!;
+const bpmEl = document.querySelector<HTMLInputElement>('#bpm')!;
+const meterEl = document.querySelector<HTMLSelectElement>('#meter')!;
 const startBtn = document.querySelector<HTMLButtonElement>('#start')!;
 const stopBtn = document.querySelector<HTMLButtonElement>('#stop')!;
 const nowEl = document.querySelector<HTMLParagraphElement>('#now')!;
 const nextEl = document.querySelector<HTMLParagraphElement>('#next')!;
 const logEl = document.querySelector<HTMLOListElement>('#log')!;
+const metaBpmEl = document.querySelector<HTMLElement>('#metaBpm')!;
+const metaKeyEl = document.querySelector<HTMLElement>('#metaKey')!;
+const metaMeterEl = document.querySelector<HTMLElement>('#metaMeter')!;
+const metaSoundEl = document.querySelector<HTMLElement>('#metaSound')!;
 
-const LABEL: Record<Who, string> = { drums: 'Drums', bass: 'Bass', system: 'System' };
+const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System' };
 
-function log(who: Who, text: string, bars?: string) {
+function log(who: Who, text: string, tag?: string) {
   const li = document.createElement('li');
   li.className = `msg ${who}`;
   const head = document.createElement('div');
@@ -81,11 +117,11 @@ function log(who: Who, text: string, bars?: string) {
   name.className = 'who';
   name.textContent = LABEL[who];
   head.append(name);
-  if (bars) {
-    const tag = document.createElement('span');
-    tag.className = 'bars';
-    tag.textContent = bars;
-    head.append(tag);
+  if (tag) {
+    const tagEl = document.createElement('span');
+    tagEl.className = 'bars';
+    tagEl.textContent = tag;
+    head.append(tagEl);
   }
   const p = document.createElement('p');
   p.textContent = text; // agent text is untrusted: never innerHTML
@@ -97,14 +133,23 @@ function log(who: Who, text: string, bars?: string) {
 function setMode(mode: Mode) {
   startBtn.disabled = mode !== 'idle';
   vibeEl.disabled = mode !== 'idle';
+  bpmEl.disabled = mode !== 'idle';
+  meterEl.disabled = mode !== 'idle';
   stopBtn.disabled = mode === 'idle';
   if (mode === 'idle') {
     nowEl.textContent = 'Press Start to hear the band.';
     nextEl.textContent = '';
   } else if (mode === 'loading') {
-    nowEl.textContent = 'The band is writing the first four bars…';
+    nowEl.textContent = 'Starting…';
     nextEl.textContent = '';
   }
+}
+
+function showSettings(state: JamState, preset: string) {
+  metaBpmEl.textContent = `${state.tempo} BPM`;
+  metaKeyEl.textContent = state.key;
+  metaMeterEl.textContent = state.timeSignature;
+  metaSoundEl.textContent = preset;
 }
 
 const barsOf = (n: number) => `${(n - 1) * BARS_PER_CHUNK + 1}–${n * BARS_PER_CHUNK}`;
@@ -114,64 +159,26 @@ function renderStatus(s: Session) {
     nowEl.textContent = `Playing bars ${barsOf(s.current.n)} (bar ${s.bar + 1} of ${BARS_PER_CHUNK})`;
   }
   const st = s.pipeline.status();
-  const busy: string[] = [];
-  if (st.bassN !== null) busy.push(`bass for bars ${barsOf(st.bassN)}`);
-  if (st.drumsN !== null) busy.push(`drums for bars ${barsOf(st.drumsN)}`);
   const buffer = `Buffered ahead: ${st.ready * BARS_PER_CHUNK} of ${BUFFER_BLOCKS * BARS_PER_CHUNK} bars`;
-  nextEl.textContent = busy.length ? `${buffer} · writing ${busy.join(' and ')}` : buffer;
+  const busy = st.working.map((w) => `${w.stage} for bars ${barsOf(w.n)}`);
+  nextEl.textContent = busy.length ? `${buffer} · writing ${busy.join(', ')}` : buffer;
 }
 
-// ---------- Instruments ----------
-
-interface Instruments {
-  kick: Tone.MembraneSynth;
-  snare: Tone.NoiseSynth;
-  hat: Tone.NoiseSynth;
-  bass: Tone.MonoSynth;
-}
-
-let instruments: Instruments | undefined;
-
-function getInstruments(): Instruments {
-  if (instruments) return instruments;
-  const kick = new Tone.MembraneSynth({
-    pitchDecay: 0.05,
-    octaves: 6,
-    envelope: { attack: 0.001, decay: 0.3, sustain: 0, release: 0.1 },
-    volume: -4,
-  }).toDestination();
-  const snare = new Tone.NoiseSynth({
-    noise: { type: 'white' },
-    envelope: { attack: 0.001, decay: 0.16, sustain: 0 },
-    volume: -12,
-  }).connect(new Tone.Filter(1500, 'highpass').toDestination());
-  const hat = new Tone.NoiseSynth({
-    noise: { type: 'white' },
-    envelope: { attack: 0.001, decay: 0.04, sustain: 0 },
-    volume: -22,
-  }).connect(new Tone.Filter(7000, 'highpass').toDestination());
-  const bass = new Tone.MonoSynth({
-    oscillator: { type: 'sawtooth' },
-    envelope: { attack: 0.01, decay: 0.2, sustain: 0.6, release: 0.15 },
-    filter: { Q: 2, type: 'lowpass', rolloff: -24 },
-    filterEnvelope: { attack: 0.01, decay: 0.2, sustain: 0.3, release: 0.2, baseFrequency: 120, octaves: 3 },
-    volume: -6,
-  }).toDestination();
-  instruments = { kick, snare, hat, bass };
-  return instruments;
-}
-
-function playStep(chunk: Chunk, pos: number, time: number) {
-  const { kick, snare, hat, bass } = getInstruments();
-  const bar = Math.floor(pos / STEPS_PER_BAR);
-  const i = pos % STEPS_PER_BAR;
-  const d = chunk.drums[bar];
-  if (d.kick[i]) kick.triggerAttackRelease('C1', '8n', time);
-  if (d.snare[i]) snare.triggerAttackRelease('16n', time);
-  if (d.hat[i]) hat.triggerAttackRelease('32n', time);
-  for (const n of chunk.bass[bar]) {
-    if (n.step === i) bass.triggerAttackRelease(n.note, n.dur, time);
+/** Reads the BPM box and meter dropdown. A BPM outside 60-180 is clamped into range (and the box updated); anything that is not a number counts as Auto. */
+function readOverrides(): ConductorOverrides {
+  const overrides: ConductorOverrides = {};
+  const raw = bpmEl.value.trim();
+  if (raw !== '') {
+    const n = Math.round(Number(raw));
+    if (Number.isFinite(n)) {
+      overrides.bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, n));
+      bpmEl.value = String(overrides.bpm);
+    } else {
+      bpmEl.value = '';
+    }
   }
+  if (meterEl.value) overrides.timeSignature = meterEl.value as TimeSignature;
+  return overrides;
 }
 
 // ---------- Talking to the agents ----------
@@ -189,8 +196,17 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-function logAgent(who: 'drums' | 'bass', n: number, reply: AgentReply<unknown>) {
-  log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
+/** Index in the shared state of bar `i` (0-3) of block `n`. */
+const barIndex = (n: number, i: number) => (n - 1) * BARS_PER_CHUNK + i;
+
+/** One musician's turn: send the shared state plus the earlier parts, log its note, and record its bars in the shared state. */
+async function runStage<T>(s: Session, who: PartName, n: number, earlier: object, record: (bars: T[]) => void): Promise<T[]> {
+  const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
+  const reply = await post<AgentReply<T>>(`/api/agents/${who}`, { state: snapshot, ...earlier });
+  if (session !== s) throw new Error('stopped');
+  if (reply.why) log(who, reply.why, `bars ${barsOf(n)} · ${reply.latencyMs} ms`);
+  record(reply.bars);
+  return reply.bars;
 }
 
 // ---------- Transport ----------
@@ -200,40 +216,53 @@ let session: Session | null = null;
 
 function newSession(vibe: string): Session {
   const s: Session = {
-    state: { tempo: TEMPO, key: KEY, vibe, bars: [] },
+    // tempo, key and time signature are replaced by the conductor's answer before the pipeline starts
+    state: { tempo: 90, key: 'A minor', timeSignature: '4/4', vibe, bars: [] },
+    stepsPerBar: 16,
     current: null,
     step: 0,
     bar: 0,
     loopWarned: false,
-    pipeline: new Pipeline<DrumBar[], BassBar[]>({
+    pipeline: new Pipeline<BlockParts>({
       bufferBlocks: BUFFER_BLOCKS,
 
-      // Stage 1: the drummer reads the shared state and appends its four bars (bass still null).
-      writeDrums: async (n) => {
-        const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
-        const reply = await post<AgentReply<DrumBar>>('/api/agents/drums', { state: snapshot });
-        if (session !== s) throw new Error('stopped');
-        logAgent('drums', n, reply);
-        for (const drums of reply.bars) s.state.bars.push({ drums, bass: null });
-        return reply.bars;
-      },
-
-      // Stage 2: the bassist gets those drum bars and fills in the matching bass bars.
-      writeBass: async (n, drums) => {
-        const snapshot = { ...s.state, bars: s.state.bars.slice(-STATE_TAIL_BARS) };
-        const reply = await post<AgentReply<BassBar>>('/api/agents/bass', { state: snapshot, drums });
-        if (session !== s) throw new Error('stopped');
-        logAgent('bass', n, reply);
-        reply.bars.forEach((bass, i) => {
-          s.state.bars[(n - 1) * BARS_PER_CHUNK + i].bass = bass;
-        });
-        return reply.bars;
-      },
+      // Order per block: drums -> bass -> keys -> melody. Each stage is sent every earlier part.
+      stages: [
+        {
+          name: 'drums',
+          write: (n) =>
+            runStage<DrumBar>(s, 'drums', n, {}, (bars) => {
+              for (const drums of bars) s.state.bars.push({ key: s.state.key, drums, bass: null, keys: null, melody: null });
+            }),
+        },
+        {
+          name: 'bass',
+          write: (n, up) =>
+            runStage<BassBar>(s, 'bass', n, { drums: up.drums }, (bars) => {
+              bars.forEach((bass, i) => (s.state.bars[barIndex(n, i)].bass = bass));
+            }),
+        },
+        {
+          name: 'keys',
+          write: (n, up) =>
+            runStage<ChordBar>(s, 'keys', n, { drums: up.drums, bass: up.bass }, (bars) => {
+              bars.forEach((keys, i) => (s.state.bars[barIndex(n, i)].keys = keys));
+            }),
+        },
+        {
+          name: 'melody',
+          write: (n, up) =>
+            runStage<MelodyBar>(s, 'melody', n, { drums: up.drums, bass: up.bass, keys: up.keys }, (bars) => {
+              bars.forEach((melody, i) => (s.state.bars[barIndex(n, i)].melody = melody));
+            }),
+        },
+      ],
 
       onBlockReady: () => s.waitFirst?.resolve(),
 
+      // Errors never reach the band chat: the console has them, the music keeps going.
       onError: (stage, n, err, willRetry) => {
-        log('system', `The ${stage} agent failed for bars ${barsOf(n)} (${errMsg(err)}). ${willRetry ? 'Trying again…' : 'Pausing; I will try again at the next phrase.'}`);
+        console.warn(`[client] ${stage} request for bars ${barsOf(n)} failed (${errMsg(err)}); ${willRetry ? 'retrying' : 'pausing until the next phrase'}`);
         if (!willRetry) s.waitFirst?.reject(new Error(errMsg(err)));
       },
 
@@ -248,7 +277,8 @@ function newSession(vibe: string): Session {
 /** Runs on every 16th note, ahead of the audio clock. `time` is the exact audio time for this step. */
 function tick(s: Session, time: number) {
   if (session !== s || !s.current) return;
-  const pos = s.step % CHUNK_STEPS;
+  const chunkSteps = s.stepsPerBar * BARS_PER_CHUNK;
+  const pos = s.step % chunkSteps;
 
   if (pos === 0 && s.step > 0) {
     const next = s.pipeline.take(); // also kicks off generation for the freed buffer slot
@@ -257,31 +287,59 @@ function tick(s: Session, time: number) {
       s.loopWarned = false;
     } else if (!s.loopWarned) {
       s.loopWarned = true;
-      Tone.getDraw().schedule(() => log('system', 'The next bars are not ready yet, so the current four repeat to keep the music going.'), time);
+      console.info('[client] the next bars are not ready yet; repeating the current four');
     }
   }
 
-  if (pos % STEPS_PER_BAR === 0) {
-    s.bar = Math.floor(pos / STEPS_PER_BAR);
+  if (pos % s.stepsPerBar === 0) {
+    s.bar = pos / s.stepsPerBar;
     Tone.getDraw().schedule(() => renderStatus(s), time);
   }
 
-  playStep(s.current, pos, time);
+  getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar), time);
   s.step += 1;
+}
+
+function logConductor(c: ConductorReply, o: ConductorOverrides) {
+  if (!c.why) return; // the conductor fell back to defaults: nothing to say
+  const bpm = `${c.bpm} BPM${o.bpm !== undefined ? ' (manual)' : ''}`;
+  const meter = `${c.timeSignature}${o.timeSignature ? ' (manual)' : ''}`;
+  log('conductor', c.why, `${bpm} · ${c.key} · ${meter} · ${c.preset} · ${c.latencyMs} ms`);
 }
 
 async function start() {
   if (session) return;
+  const overrides = readOverrides();
   const vibe = vibeEl.value.trim() || DEFAULT_VIBE;
   const s = newSession(vibe);
   session = s;
   setMode('loading');
   logEl.replaceChildren();
-  log('system', `Vibe: "${vibe}". ${TEMPO} BPM, ${KEY}.`);
+  metaBpmEl.textContent = metaKeyEl.textContent = metaMeterEl.textContent = metaSoundEl.textContent = '–';
+  log('system', `Vibe: "${vibe}".`);
 
   try {
     await Tone.start(); // must run inside the click so the browser allows audio
-    getInstruments();
+
+    // 1. The conductor runs first on every new vibe.
+    nowEl.textContent = 'The conductor is choosing tempo, key and meter…';
+    const c = await post<ConductorReply>('/api/agents/conductor', { vibe, overrides });
+    if (session !== s) return;
+    s.state.tempo = c.bpm;
+    s.state.key = c.key;
+    s.state.timeSignature = c.timeSignature;
+    const meter = meterOf(c.timeSignature);
+    s.stepsPerBar = meter.stepsPerBar;
+    showSettings(s.state, c.preset);
+    logConductor(c, overrides);
+
+    // Tempo first: the delay time in the sound preset follows the bpm.
+    transport.bpm.value = c.bpm;
+    transport.timeSignature = [meter.numerator, meter.denominator];
+    await getRig().applyPreset(c.preset);
+
+    // 2. Then the band writes the first block (drums -> bass -> keys -> melody).
+    nowEl.textContent = 'The band is writing the first four bars…';
     await new Promise<void>((resolve, reject) => {
       s.waitFirst = { resolve, reject };
       s.pipeline.start();
@@ -293,8 +351,8 @@ async function start() {
     if (session !== s) return;
     s.pipeline.stop();
     session = null;
-    log('system', `Couldn't start: ${errMsg(err)}`);
-    setMode('idle');
+    console.error(`[client] could not start: ${errMsg(err)}`);
+    setMode('idle'); // back to "Press Start": no error text in the UI
     return;
   }
   if (session !== s) return;
@@ -302,7 +360,6 @@ async function start() {
   transport.stop();
   transport.cancel(0);
   transport.position = 0;
-  transport.bpm.value = TEMPO;
   transport.scheduleRepeat((time) => tick(s, time), '16n');
   transport.start('+0.1');
   setMode('playing');
@@ -317,12 +374,15 @@ function stop() {
   s.waitFirst?.reject(new Error('stopped'));
   transport.stop();
   transport.cancel(0);
+  getRig().silence();
   setMode('idle');
   log('system', 'Stopped.');
 }
 
 startBtn.addEventListener('click', () => void start());
 stopBtn.addEventListener('click', stop);
-vibeEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') void start();
-});
+for (const el of [vibeEl, bpmEl]) {
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void start();
+  });
+}

@@ -79,3 +79,40 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .msg.bass .who { color: var(--bass); }
 .msg .bars { color: var(--muted); }
 .msg p { margin: 2px 0 0; }
+
+/* ---- conductor, keys, melody, and the BPM / time controls ---- */
+:root {
+  --conductor: #7c9cff;
+  --keys: #5ad19a;
+  --melody: #ff8fb0;
+}
+
+.bar { display: grid; gap: 10px 10px; grid-template-columns: 1fr 88px 92px auto; align-items: end; margin-bottom: 16px; }
+.bar .actions { display: flex; gap: 8px; }
+@media (max-width: 680px) {
+  .bar { grid-template-columns: 1fr 1fr; }
+  .bar .field.vibe { grid-column: 1 / -1; }
+  .bar .actions { grid-column: 1 / -1; }
+}
+.field label { margin-bottom: 4px; }
+
+select {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 8px;
+  font: inherit;
+}
+select:disabled { opacity: 0.6; }
+input[aria-invalid='true'] { border-color: var(--bad); }
+
+.meta { flex-wrap: wrap; }
+
+.msg.conductor { border-color: var(--conductor); }
+.msg.keys { border-color: var(--keys); }
+.msg.melody { border-color: var(--melody); }
+.msg.conductor .who { color: var(--conductor); }
+.msg.keys .who { color: var(--keys); }
+.msg.melody .who { color: var(--melody); }

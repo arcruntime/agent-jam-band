@@ -1,3 +1,4 @@
+import { VOX_ENABLED } from '../shared/flags.js';
 import express from 'express';
 import { z } from 'zod';
 import { meterOf } from '../shared/meter.js';
@@ -133,6 +134,8 @@ route('/api/agents/melody', async (b) => {
 
 // The vox chops the melody: it reads the drums, the keys and the melody of the same 4 bars.
 route('/api/agents/vox', async (b) => {
+  // Switched off (see shared/flags.ts): the agent is never called.
+  if (!VOX_ENABLED) return { why: '', bars: [[], [], [], []], latencyMs: 0 };
   const state = jamStateSchema.parse(b.state);
   const steps = stepsFor(state);
   return voxAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(keysBarSchema(steps)).parse(b.keys), four(melodyBarSchema(steps)).parse(b.melody), memoryOf(b), planOf(b));

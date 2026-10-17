@@ -37,6 +37,8 @@ Six switches under the graph work live while the band plays, and none of them re
 
 ## Vox (robot vocal chops)
 
+The vox is currently switched off by one flag, `VOX_ENABLED` in `shared/flags.ts` (set it to `true` to bring it back). While it is `false` the server never calls the vox agent, no vox audio plays, the melody is not asked to leave gaps, and the vox is hidden from the graph, the token counters, the Studio switches and the legend. All the vox code is still there.
+
 The fifth musician, vox, plays vowel chops. There is no audio model, so the voice is built in Tone.js (`src/vox.ts`): an FM sawtooth source goes through an amplitude envelope and three parallel bandpass filters set to the formants of the vowel ("ah", "oh", "ee" or "oo"), then a bit crusher (a stepped WaveShaper), a highpass, a presence dip, a lowpass, a small compressor that evens out the vowels and a bus that is always under the melody. Each chop glides up into its note, and the filters glide to the next vowel. The voice is monophonic. It uses the same block format as the other agents (4 bars of hits on the step grid, each with `step`, `note`, `vowel`, `dur` and an optional `velocity`), it reads band memory, and it can echo a melody motif as a chop (an ECHOES edge in the graph, with `LOCKS_TO` the melody). It has its own graph color, token counter and Studio switch ("Vox chops").
 
 **Each preset has a vox style** (`shared/vox.ts`):

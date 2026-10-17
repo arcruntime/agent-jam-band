@@ -4,6 +4,7 @@ import type { z } from 'zod';
 import { BLOCK_BARS, defaultArrangement, parseChord, sanitizeArrangement, sectionFromText, sectionNameOf, type BlockPlan, type SectionName } from '../shared/arrangement.js';
 import { meterOf, type Meter } from '../shared/meter.js';
 import { SOUND_PRESETS, isSoundPreset, type SoundPreset } from '../shared/presets.js';
+import { VOX_ENABLED } from '../shared/flags.js';
 import { VOX_BRIEF, VOX_SECTION, VOX_STYLE, voxWindows, type VoxStyle, type VoxWindow } from '../shared/vox.js';
 import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar, TokenUsage, VoxBar } from '../shared/types.js';
 import { config } from './config.js';
@@ -522,7 +523,8 @@ export async function keysAgent(state: JamState, drums: DrumBar[], bass: BassBar
 /** The vox style the block is written for (from its preset; the default preset's style when none was sent) and the windows that belong to the vox in it. */
 function voxPlanOf(plan: BlockPlan | undefined, stepsPerBar: number): { style: VoxStyle; windows: VoxWindow[] } {
   const style = plan?.preset && isSoundPreset(plan.preset) ? VOX_STYLE[plan.preset] : VOX_STYLE.lofi;
-  return { style, windows: plan ? voxWindows(style, plan.section, stepsPerBar) : [] };
+  // With the vox switched off nobody owns a window, so the melody is not asked to leave gaps.
+  return { style, windows: plan && VOX_ENABLED ? voxWindows(style, plan.section, stepsPerBar) : [] };
 }
 
 export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassBar[], keys: ChordBar[], ctx?: Ctx, plan?: BlockPlan): Promise<AgentReply<MelodyBar>> {
@@ -555,6 +557,8 @@ export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassB
 }
 
 export async function voxAgent(state: JamState, drums: DrumBar[], keys: ChordBar[], melody: MelodyBar[], ctx?: Ctx, plan?: BlockPlan): Promise<AgentReply<VoxBar>> {
+  // Switched off (see shared/flags.ts): never ask the model for anything.
+  if (!VOX_ENABLED) return { why: '', bars: silentVox(), latencyMs: 0 };
   const m = meterOf(state.timeSignature);
   const { style, windows } = voxPlanOf(plan, m.stepsPerBar);
   // Nothing to ask when the vox has no window in this block (the whole intro, a rock build, a style's quiet bars): no model call, no tokens, nothing remembered.

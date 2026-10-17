@@ -19,6 +19,7 @@ import { DrumMachine, ElectricPiano, SplendidGrandPiano, getDrumMachineNames } f
 import * as Tone from 'tone';
 import type { SoundPreset } from '../shared/presets';
 import type { StepEvents } from './steps';
+import { VOX_ENABLED } from '../shared/flags';
 import { createVoxVoice } from './vox';
 import { VOX_STYLE, type VoxStyle } from '../shared/vox';
 
@@ -341,7 +342,7 @@ export function createRig(): Rig {
   voxVoice.output.connect(voxDuck);
   /** Where the vox bus sits for the current preset: under the melody, or shut when the Studio switch is off. */
   const voxStyle = (): VoxStyle => VOX_STYLE[current ?? 'lofi'];
-  const voxLevel = () => (studio.vox ? Tone.dbToGain(settings.melody.volume + VOX_LEVEL_DB[current ?? 'lofi']) : 0);
+  const voxLevel = () => (VOX_ENABLED && studio.vox ? Tone.dbToGain(settings.melody.volume + VOX_LEVEL_DB[current ?? 'lofi']) : 0);
   const voxSendLevel = () => (studio.sends ? VOX_REVERB_SEND[voxStyle()] : 0);
 
   // ---- sampled instruments: they join the same chains as the synths they replace ----
@@ -642,7 +643,7 @@ export function createRig(): Rig {
       }
       for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
       // Vox off: nothing is triggered at all (the gate is shut as well, so a chop already ringing fades out).
-      if (studio.vox) for (const n of ev.vox ?? []) safely('vox', () => {
+      if (VOX_ENABLED && studio.vox) for (const n of ev.vox ?? []) safely('vox', () => {
         voxVoice.sing(n.note, n.vowel, Tone.Time(n.dur).toSeconds(), time + jit(), n.velocity);
         voxCount.triggered++;
         voxCount.lastNote = n.note;

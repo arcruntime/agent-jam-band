@@ -17,6 +17,7 @@ import type {
 } from '../shared/types';
 import { defaultArrangement, describeArrangement, reharmonize, sanitizeArrangement, sectionStart, slotsOf, type Arrangement, type BlockSlot, type SectionName } from '../shared/arrangement';
 import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
+import { VOX_ENABLED } from '../shared/flags';
 import { getRig, type StudioKey } from './audio';
 import { createGraphPanel, type EchoEvent } from './graph';
 import { Pipeline, type Block } from './pipeline';
@@ -38,10 +39,10 @@ type Who = 'conductor' | PartName | 'system' | 'steer';
 type Mode = 'idle' | 'loading' | 'playing';
 
 /** Who gets a token counter. */
-const TOKEN_AGENTS = ['conductor', 'drums', 'bass', 'keys', 'melody', 'vox'] as const;
+const TOKEN_AGENTS = (VOX_ENABLED ? ['conductor', 'drums', 'bass', 'keys', 'melody', 'vox'] : ['conductor', 'drums', 'bass', 'keys', 'melody']) as readonly string[];
 
 /** The Studio switches, each with a one-line plain explanation. */
-const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
+const ALL_STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
   { key: 'master', name: 'Master bus', why: 'EQ, compressor and limiter glue the mix and stop clipping. Off: raw and louder.' },
   { key: 'humanize', name: 'Humanize', why: 'Swing, timing wobble and varied hit strength. Off: a rigid grid, every hit equal.' },
   { key: 'ducking', name: 'Ducking', why: 'Keys dip when the kick hits, creating the pumping feel.' },
@@ -49,6 +50,7 @@ const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
   { key: 'stereo', name: 'Panning', why: 'Keys a little left, melody a little right. Off: everything dead center (mono).' },
   { key: 'vox', name: 'Vox chops', why: 'Robot vowels made from filtered synths. Off: no vox.' },
 ];
+const STUDIO_TOOLS = ALL_STUDIO_TOOLS.filter((t) => VOX_ENABLED || t.key !== 'vox');
 
 /** Quick steers: the label is also the text sent to the conductor. */
 const QUICK_STEERS = ['7/8', '5/4', 'half-time', 'drop', 'breakdown', 'darker', 'genre: jazz'];
@@ -117,7 +119,7 @@ app.innerHTML = `
     <header class="top">
       <div class="brand">
         <h1>Agent Jam Band</h1>
-        <div class="brand-dots" aria-hidden="true"><i class="d-drums"></i><i class="d-bass"></i><i class="d-keys"></i><i class="d-melody"></i><i class="d-vox"></i></div>
+        <div class="brand-dots" aria-hidden="true"><i class="d-drums"></i><i class="d-bass"></i><i class="d-keys"></i><i class="d-melody"></i>${VOX_ENABLED ? '<i class="d-vox"></i>' : ''}</div>
       </div>
       <div class="field vibe">
         <label for="vibe">Vibe</label>
@@ -202,7 +204,7 @@ app.innerHTML = `
         </div>
         <div id="legendPop" class="legend-pop" role="note" hidden>
           <ul>
-            <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: <b class="c-drums">drums</b>, <b class="c-bass">bass</b>, <b class="c-keys">keys</b>, <b class="c-melody">melody</b> and <b class="c-vox">vox</b></span></li>
+            <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: <b class="c-drums">drums</b>, <b class="c-bass">bass</b>, <b class="c-keys">keys</b>${VOX_ENABLED ? ', ' : ' '}${VOX_ENABLED ? '<b class="c-melody">melody</b> and <b class="c-vox">vox</b>' : 'and <b class="c-melody">melody</b>'}</span></li>
             <li><i class="k-motif"></i><span><b>Small colored dots</b> are motifs, the phrases an agent played</span></li>
             <li><i class="k-block"></i><span><b>Grey</b> dots are blocks, four bars each</span></li>
             <li><i class="k-echo"></i><span><b>White lines</b> are ECHOES: an agent called back another's idea</span></li>
@@ -700,16 +702,16 @@ function newSession(vibe: string): Session {
               bars.forEach((melody, i) => (barOf(s, n, i).melody = melody));
             }),
         },
-        {
+        ...(!VOX_ENABLED ? [] : [{
           // The vox listens to the whole band and chops the melody; it is silent in intros (the server answers without a model call).
-          name: 'vox',
-          write: (n, up) =>
+          name: 'vox' as const,
+          write: (n: number, up: Partial<BlockParts>) =>
             runStage<VoxBar>(s, 'vox', n, { drums: up.drums, keys: up.keys, melody: up.melody }, (bars) => {
               bars.forEach((vox, i) => (barOf(s, n, i).vox = vox));
               // Console only: a quiet vox can be traced from here (what section, how many chops, and how many have been triggered so far).
               console.info(`[vox] block ${n} (${s.plans.get(n)?.slot.section ?? '?'}) bars ${barsOf(n)}: hits/bar ${JSON.stringify(bars.map((b) => b.length))}, Studio vox ${getRig().getStudio().vox ? 'on' : 'off'}, triggered so far ${getRig().voxStats().triggered}`);
             }),
-        },
+        }]),
       ],
 
       onBlockReady: () => {
@@ -764,7 +766,7 @@ function tick(s: Session, time: number) {
     // A build sweeps the vox's filter open bar by bar; in any other section it is fully open.
     const slot = s.plans.get(s.current.n)?.slot;
     const open = slot?.section === 'build' ? (slot.sectionBar - 1 + s.bar + 1) / slot.sectionBars : 1;
-    getRig().voxOpen(open, time, s.stepsPerBar * Tone.Time('16n').toSeconds());
+    if (VOX_ENABLED) getRig().voxOpen(open, time, s.stepsPerBar * Tone.Time('16n').toSeconds());
   }
 
   // Beat counter: on every beat of the bar (a quarter note in x/4, an eighth in x/8), timed to the audio like everything else.
@@ -785,7 +787,7 @@ function tick(s: Session, time: number) {
   if (ev.bass.length) sounding.push('bass');
   if (ev.keys.length) sounding.push('keys');
   if (ev.melody.length) sounding.push('melody');
-  if (getRig().getStudio().vox && ev.vox.length) sounding.push('vox');
+  if (VOX_ENABLED && getRig().getStudio().vox && ev.vox.length) sounding.push('vox');
   if (sounding.length) {
     Tone.getDraw().schedule(() => {
       if (session === s) for (const a of sounding) graphPanel.flash(a);

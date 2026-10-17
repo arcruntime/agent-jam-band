@@ -154,7 +154,7 @@ button.rec.on { color: var(--rec); border-color: var(--rec); }
 .chip[open] > summary { border-color: var(--line-2); color: var(--text); }
 .buf-dot { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: var(--keys); }
 .buffer:has(#next:empty) .buf-dot { background: var(--faint); }
-.pop-tokens { top: calc(100% + 0.52rem); left: 0; width: max-content; display: grid; grid-template-columns: repeat(6, auto); gap: 0.42rem 1.15rem; }
+.pop-tokens { top: calc(100% + 0.52rem); left: 0; width: max-content; display: grid; grid-auto-flow: column; gap: 0.42rem 1.15rem; }
 .pop-buffer { top: calc(100% + 0.52rem); left: 0; width: 29.2rem; }
 .next { margin: 0; color: var(--soft); font-size: 0.83rem; min-height: 1.4em; }
 .next:empty::before { content: 'Nothing buffered yet.'; color: var(--muted); }
@@ -227,6 +227,7 @@ button.info:hover, button.info[aria-expanded='true'] { color: var(--text); borde
 .legend-pop p { margin: 0; color: var(--muted); font-size: 0.78rem; }
 .c-drums { color: var(--drums); } .c-bass { color: var(--bass); } .c-keys { color: var(--keys); } .c-melody { color: var(--melody); } .c-vox { color: var(--vox); }
 .k-agent { width: 0.94rem; height: 0.94rem; border-radius: 50%; background: conic-gradient(var(--drums) 0 20%, var(--bass) 0 40%, var(--keys) 0 60%, var(--melody) 0 80%, var(--vox) 0); }
+.legend-pop:not(:has(.c-vox)) .k-agent { background: conic-gradient(var(--drums) 0 25%, var(--bass) 0 50%, var(--keys) 0 75%, var(--melody) 0); }
 .k-motif { width: 0.47rem; height: 0.47rem; border-radius: 50%; background: var(--melody); }
 .k-block { width: 0.36rem; height: 0.36rem; border-radius: 50%; background: #3a3f52; outline: 1px solid var(--faint); }
 .k-echo { width: 1.35rem; height: 0; border-top: 3px solid #fff; }

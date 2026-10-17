@@ -1,3 +1,4 @@
+import { VOX_ENABLED } from '../shared/flags.js';
 import { z } from 'zod';
 import { SECTION_NAMES } from '../shared/arrangement.js';
 import type { BassBar, ChordBar, DrumBar, GraphLink, GraphNode, GraphPayload, MelodyBar, VoxBar } from '../shared/types.js';
@@ -9,7 +10,7 @@ import { query, toNum } from './graph.js';
  */
 
 export type MemoryAgent = 'drums' | 'bass' | 'keys' | 'melody' | 'vox';
-export const MEMORY_AGENTS: readonly MemoryAgent[] = ['drums', 'bass', 'keys', 'melody', 'vox'];
+export const MEMORY_AGENTS: readonly MemoryAgent[] = VOX_ENABLED ? ['drums', 'bass', 'keys', 'melody', 'vox'] : ['drums', 'bass', 'keys', 'melody'];
 
 const idPart = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 export const sessionIdSchema = idPart;
@@ -111,6 +112,7 @@ export function rememberSession(sessionId: string, info: { vibe: string; bpm: nu
 
 /** Stores one agent's phrase as a Motif in its block, linked to the agent, to the part it locks to and to the motif it calls back (if any). */
 export function remember(ctx: MemoryCtx, agent: MemoryAgent, motif: { bars: unknown[]; why: string; echoes: Echo | null; fallback: boolean }) {
+  if (agent === 'vox' && !VOX_ENABLED) return; // vox switched off: it leaves no motifs
   const lockAgent = LOCKS[agent];
   const params = {
     sid: ctx.sessionId,
@@ -323,6 +325,11 @@ export async function loadGraph(sessionId: string): Promise<GraphPayload> {
     for (const r of relRows) {
       const reason = r.get('reason');
       links.push({ source: String(r.get('source')), target: String(r.get('target')), type: r.get('type') as GraphLink['type'], ...(reason ? { reason: String(reason) } : {}) });
+    }
+    if (!VOX_ENABLED) {
+      // Vox switched off: hide any vox motifs an older run may have stored (their nodes, and every link that touches them).
+      const gone = new Set(nodes.filter((n) => n.agent === 'vox').map((n) => n.id));
+      return { nodes: nodes.filter((n) => !gone.has(n.id)), links: links.filter((l) => !gone.has(String(l.source)) && !gone.has(String(l.target)) && l.source !== 'agent:vox' && l.target !== 'agent:vox'), available: true };
     }
     return { nodes, links, available: true };
   } catch (err) {

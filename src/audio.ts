@@ -3,11 +3,13 @@
  *
  *   drums:  kick (MembraneSynth) | snare (NoiseSynth + short triangle tone) | hats (MetalSynth)
  *   bass:   MonoSynth -> Distortion
- *   keys:   PolySynth of fat saws -> lowpass -> reverb -> "sidechain" duck gain
- *   melody: Synth (square/saw) -> lowpass -> vibrato -> ping-pong delay
- *   all:    -> master lowpass -> limiter -> speakers
+ *   keys:   PolySynth of fat saws -> lowpass -> "sidechain" duck gain -> pan -0.2
+ *   melody: Synth (square/saw) -> lowpass -> vibrato -> feedback delay -> pan +0.2
+ *   keys and melody (only) also feed one shared reverb send
+ *   all:    -> master lowpass -> EQ3 -> compressor -> limiter -> speakers (drums and bass go in dry and centered)
  *
- * The conductor's `preset` decides the synth settings and effect amounts (see PRESETS).
+ * The conductor's `preset` decides the synth settings, effect amounts and swing (see PRESETS).
+ * Every event plays at the strength the agent gave it, with a random +-8 ms of timing on everything except the kick.
  * The levels below are starting points chosen without listening tests; nudge `volume` values to taste.
  */
 import * as Tone from 'tone';
@@ -16,67 +18,78 @@ import type { StepEvents } from './steps';
 
 type Wave = 'sawtooth' | 'square';
 
+/** Random timing slack, in seconds, on everything except the kick. */
+const JITTER_S = 0.008;
+const jitter = () => (Math.random() * 2 - 1) * JITTER_S;
+
 interface PresetSettings {
   /** Master lowpass in Hz: lower = duller, warmer */
   masterLowpass: number;
+  /** Tone.Transport swing (0-1), applied to sixteenths */
+  swing: number;
   kick: { octaves: number; decay: number; volume: number };
   snare: { noiseDecay: number; noiseHighpass: number; noiseVolume: number; toneHz: number; toneVolume: number };
   hat: { decay: number; volume: number; hz: number; resonance: number };
   bass: { wave: Wave; baseFrequency: number; filterOctaves: number; q: number; distortion: number; release: number; volume: number };
   keys: { spread: number; attack: number; release: number; lowpass: number; reverbWet: number; reverbDecay: number; duckDb: number; volume: number };
-  melody: { wave: Wave; attack: number; release: number; lowpass: number; vibratoHz: number; vibratoDepth: number; delayWet: number; delayFeedback: number; volume: number };
+  melody: { wave: Wave; attack: number; release: number; lowpass: number; vibratoHz: number; vibratoDepth: number; delayWet: number; delayFeedback: number; reverbSend: number; volume: number };
 }
 
 export const PRESETS: Record<SoundPreset, PresetSettings> = {
   // Dusty and warm: dull top end, soft hats, gentle ducking, roomy keys.
   lofi: {
     masterLowpass: 6500,
+    swing: 0.2,
     kick: { octaves: 6, decay: 0.28, volume: -5 },
     snare: { noiseDecay: 0.14, noiseHighpass: 1200, noiseVolume: -16, toneHz: 190, toneVolume: -18 },
     hat: { decay: 0.035, volume: -32, hz: 220, resonance: 3500 },
     bass: { wave: 'sawtooth', baseFrequency: 90, filterOctaves: 2.2, q: 2, distortion: 0.1, release: 0.2, volume: -7 },
     keys: { spread: 24, attack: 0.04, release: 1.2, lowpass: 1800, reverbWet: 0.35, reverbDecay: 2.6, duckDb: -6, volume: -24 },
-    melody: { wave: 'square', attack: 0.03, release: 0.5, lowpass: 2200, vibratoHz: 4.5, vibratoDepth: 0.12, delayWet: 0.25, delayFeedback: 0.3, volume: -20 },
+    melody: { wave: 'square', attack: 0.03, release: 0.5, lowpass: 2200, vibratoHz: 4.5, vibratoDepth: 0.12, delayWet: 0.25, delayFeedback: 0.3, reverbSend: 0.25, volume: -20 },
   },
   // Wide, bright and pumping.
   futurebass: {
     masterLowpass: 20000,
+    swing: 0.05,
     kick: { octaves: 6, decay: 0.35, volume: -3 },
     snare: { noiseDecay: 0.2, noiseHighpass: 1500, noiseVolume: -12, toneHz: 200, toneVolume: -14 },
     hat: { decay: 0.04, volume: -28, hz: 300, resonance: 4500 },
     bass: { wave: 'sawtooth', baseFrequency: 140, filterOctaves: 3.5, q: 3, distortion: 0.25, release: 0.25, volume: -7 },
     keys: { spread: 45, attack: 0.01, release: 0.6, lowpass: 3500, reverbWet: 0.3, reverbDecay: 2.2, duckDb: -8, volume: -22 },
-    melody: { wave: 'sawtooth', attack: 0.02, release: 0.4, lowpass: 6000, vibratoHz: 5.5, vibratoDepth: 0.15, delayWet: 0.25, delayFeedback: 0.35, volume: -17 },
+    melody: { wave: 'sawtooth', attack: 0.02, release: 0.4, lowpass: 6000, vibratoHz: 5.5, vibratoDepth: 0.15, delayWet: 0.25, delayFeedback: 0.35, reverbSend: 0.2, volume: -17 },
   },
   // Tight and driving: strong kick, plucky bass, hard pumping keys.
   house: {
     masterLowpass: 20000,
+    swing: 0.1,
     kick: { octaves: 6, decay: 0.3, volume: -2 },
     snare: { noiseDecay: 0.18, noiseHighpass: 1800, noiseVolume: -13, toneHz: 220, toneVolume: -16 },
     hat: { decay: 0.05, volume: -28, hz: 320, resonance: 5000 },
     bass: { wave: 'sawtooth', baseFrequency: 110, filterOctaves: 3, q: 4, distortion: 0.15, release: 0.12, volume: -6 },
     keys: { spread: 30, attack: 0.01, release: 0.4, lowpass: 2500, reverbWet: 0.25, reverbDecay: 1.8, duckDb: -8, volume: -22 },
-    melody: { wave: 'square', attack: 0.01, release: 0.3, lowpass: 5000, vibratoHz: 5, vibratoDepth: 0.08, delayWet: 0.2, delayFeedback: 0.3, volume: -18 },
+    melody: { wave: 'square', attack: 0.01, release: 0.3, lowpass: 5000, vibratoHz: 5, vibratoDepth: 0.08, delayWet: 0.2, delayFeedback: 0.3, reverbSend: 0.15, volume: -18 },
   },
   // Dry and gritty: more bass drive, little reverb, bigger snare.
   rock: {
     masterLowpass: 20000,
+    swing: 0,
     kick: { octaves: 6, decay: 0.25, volume: -3 },
     snare: { noiseDecay: 0.22, noiseHighpass: 1000, noiseVolume: -11, toneHz: 170, toneVolume: -13 },
     hat: { decay: 0.06, volume: -28, hz: 260, resonance: 4000 },
     bass: { wave: 'sawtooth', baseFrequency: 150, filterOctaves: 2.5, q: 2, distortion: 0.4, release: 0.15, volume: -8 },
     keys: { spread: 20, attack: 0.01, release: 0.4, lowpass: 2200, reverbWet: 0.15, reverbDecay: 1.2, duckDb: -3, volume: -23 },
-    melody: { wave: 'sawtooth', attack: 0.01, release: 0.3, lowpass: 4500, vibratoHz: 5.5, vibratoDepth: 0.2, delayWet: 0.15, delayFeedback: 0.25, volume: -19 },
+    melody: { wave: 'sawtooth', attack: 0.01, release: 0.3, lowpass: 4500, vibratoHz: 5.5, vibratoDepth: 0.2, delayWet: 0.15, delayFeedback: 0.25, reverbSend: 0.1, volume: -19 },
   },
   // Slow and washed out: soft drums, long pads, lots of space.
   ambient: {
     masterLowpass: 9000,
+    swing: 0,
     kick: { octaves: 4, decay: 0.4, volume: -9 },
     snare: { noiseDecay: 0.3, noiseHighpass: 900, noiseVolume: -20, toneHz: 160, toneVolume: -22 },
     hat: { decay: 0.08, volume: -34, hz: 200, resonance: 3000 },
     bass: { wave: 'sawtooth', baseFrequency: 70, filterOctaves: 1.8, q: 1, distortion: 0.05, release: 0.6, volume: -11 },
     keys: { spread: 50, attack: 0.6, release: 3, lowpass: 3000, reverbWet: 0.6, reverbDecay: 6, duckDb: -2, volume: -24 },
-    melody: { wave: 'square', attack: 0.1, release: 1.5, lowpass: 1800, vibratoHz: 4, vibratoDepth: 0.2, delayWet: 0.35, delayFeedback: 0.45, volume: -22 },
+    melody: { wave: 'square', attack: 0.1, release: 1.5, lowpass: 1800, vibratoHz: 4, vibratoDepth: 0.2, delayWet: 0.35, delayFeedback: 0.45, reverbSend: 0.4, volume: -22 },
   },
 };
 
@@ -94,9 +107,16 @@ export interface Rig {
 
 /** Build the whole audio graph on the current Tone context. */
 export function createRig(): Rig {
-  // ---- master ----
+  // ---- master bus: preset lowpass -> EQ3 (flat to start with) -> compressor -> limiter -> speakers ----
   const limiter = new Tone.Limiter(-1).toDestination();
-  const master = new Tone.Filter(20000, 'lowpass').connect(limiter);
+  const compressor = new Tone.Compressor({ threshold: -18, ratio: 3 }).connect(limiter);
+  const eq = new Tone.EQ3().connect(compressor);
+  const master = new Tone.Filter(20000, 'lowpass').connect(eq);
+
+  // ---- one reverb shared by keys and melody (drums and bass never touch it) ----
+  const reverb = new Tone.Reverb({ decay: 2.5, wet: 1 }).connect(master);
+  const keysSend = new Tone.Gain(0.3).connect(reverb);
+  const melodySend = new Tone.Gain(0.2).connect(reverb);
 
   // ---- drums ----
   const kick = new Tone.MembraneSynth({
@@ -132,17 +152,22 @@ export function createRig(): Rig {
     filterEnvelope: { attack: 0.01, decay: 0.2, sustain: 0.3, release: 0.2, baseFrequency: 120, octaves: 3 },
   }).connect(bassDistortion);
 
-  // ---- keys: fat saws -> lowpass -> reverb -> duck ----
-  const duck = new Tone.Gain(1).connect(master);
-  const keysReverb = new Tone.Reverb({ decay: 2.5, wet: 0.3 }).connect(duck);
-  const keysFilter = new Tone.Filter(2500, 'lowpass').connect(keysReverb);
+  // ---- keys: fat saws -> lowpass -> duck -> pan -0.2 (and the duck output also feeds the reverb send) ----
+  const keysPan = new Tone.Panner(-0.2).connect(master);
+  const duck = new Tone.Gain(1);
+  duck.connect(keysPan);
+  duck.connect(keysSend);
+  const keysFilter = new Tone.Filter(2500, 'lowpass').connect(duck);
   const keys = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: 'fatsawtooth', count: 3, spread: 30 },
     envelope: { attack: 0.02, decay: 0.3, sustain: 0.5, release: 0.8 },
   }).connect(keysFilter);
 
-  // ---- melody: lead -> lowpass -> vibrato -> ping-pong delay ----
-  const delay = new Tone.PingPongDelay({ delayTime: '8n', feedback: 0.3, wet: 0.2 }).connect(master);
+  // ---- melody: lead -> lowpass -> vibrato -> feedback delay -> pan +0.2 (and the delay output also feeds the reverb send) ----
+  const melodyPan = new Tone.Panner(0.2).connect(master);
+  const delay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.3, wet: 0.2 });
+  delay.connect(melodyPan);
+  delay.connect(melodySend);
   const vibrato = new Tone.Vibrato(5, 0.1).connect(delay);
   const melodyFilter = new Tone.Filter(5000, 'lowpass').connect(vibrato);
   const melody = new Tone.Synth({
@@ -212,9 +237,17 @@ export function createRig(): Rig {
       });
       keys.volume.value = p.keys.volume;
       keysFilter.frequency.value = p.keys.lowpass;
-      keysReverb.wet.value = p.keys.reverbWet;
-      keysReverb.decay = p.keys.reverbDecay; // regenerates the impulse response...
-      await keysReverb.ready; // ...which takes a moment
+      // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
+      keysSend.gain.value = p.keys.reverbWet;
+      melodySend.gain.value = p.melody.reverbSend;
+      if (reverb.decay !== p.keys.reverbDecay) {
+        reverb.decay = p.keys.reverbDecay; // regenerates the impulse response...
+        await reverb.ready; // ...which takes a moment
+      }
+
+      const transport = Tone.getTransport();
+      transport.swing = p.swing;
+      transport.swingSubdivision = '16n';
 
       melody.set({
         oscillator: { type: p.melody.wave },
@@ -230,20 +263,22 @@ export function createRig(): Rig {
     },
 
     play(ev, time) {
+      // The kick stays exactly on the grid (and the duck with it); everything else floats by up to +-8 ms.
       if (ev.kick) {
-        safely('kick', () => kick.triggerAttackRelease('C1', '8n', time));
+        safely('kick', () => kick.triggerAttackRelease('C1', '8n', time, ev.kick));
         safely('duck', () => duckKeys(time));
       }
       if (ev.snare) {
         safely('snare', () => {
-          snareNoise.triggerAttackRelease('16n', time);
-          snareTone.triggerAttackRelease(settings.snare.toneHz, '32n', time);
+          const t = time + jitter();
+          snareNoise.triggerAttackRelease('16n', t, ev.snare);
+          snareTone.triggerAttackRelease(settings.snare.toneHz, '32n', t, ev.snare);
         });
       }
-      if (ev.hat) safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time));
-      for (const n of ev.bass) safely('bass', () => bass.triggerAttackRelease(n.note, n.dur, time));
-      for (const c of ev.keys) safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time));
-      for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time));
+      if (ev.hat) safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time + jitter(), ev.hat));
+      for (const n of ev.bass) safely('bass', () => bass.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
+      for (const c of ev.keys) safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jitter(), c.velocity));
+      for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
     },
 
     silence() {

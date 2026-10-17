@@ -9,6 +9,8 @@ export interface DrumBar {
   kick: number[];
   snare: number[];
   hat: number[];
+  /** Optional strength (0-1) of the hit on each step, per row. Missing means the default of 0.8. */
+  velocity?: { kick?: number[]; snare?: number[]; hat?: number[] };
 }
 
 export interface BassNote {
@@ -18,6 +20,8 @@ export interface BassNote {
   note: string;
   /** Tone.js duration, e.g. "8n" ("1m" = one bar) */
   dur: string;
+  /** Optional strength 0-1; missing means 0.8 */
+  velocity?: number;
 }
 
 export type BassBar = BassNote[];
@@ -27,6 +31,8 @@ export interface ChordHit {
   /** e.g. ["A3", "C4", "E4"] */
   notes: string[];
   dur: string;
+  /** Optional strength 0-1; missing means 0.8 */
+  velocity?: number;
 }
 
 export type ChordBar = ChordHit[];

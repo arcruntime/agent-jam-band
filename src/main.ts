@@ -16,7 +16,7 @@ import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
 import { getRig } from './audio';
 import { createGraphPanel, type EchoEvent } from './graph';
 import { Pipeline, type Block } from './pipeline';
-import { stepEvents } from './steps';
+import { stepEvents, strongSteps } from './steps';
 
 const BARS_PER_CHUNK = 4;
 const DEFAULT_VIBE = 'dusty late-night lo-fi, sleepy but groovy';
@@ -40,6 +40,8 @@ interface Session {
   state: JamState;
   /** Sixteenth-note steps per bar, set from the conductor's time signature */
   stepsPerBar: number;
+  /** Steps that count as beats 1 and 3 (they get an accent) */
+  strong: number[];
   pipeline: Pipeline<BlockParts>;
   current: Chunk | null;
   step: number;
@@ -290,6 +292,7 @@ function newSession(vibe: string): Session {
     // tempo, key and time signature are replaced by the conductor's answer before the pipeline starts
     state: { tempo: 90, key: 'A minor', timeSignature: '4/4', vibe, bars: [] },
     stepsPerBar: 16,
+    strong: [0, 8],
     current: null,
     step: 0,
     bar: 0,
@@ -370,7 +373,7 @@ function tick(s: Session, time: number) {
     Tone.getDraw().schedule(() => renderStatus(s), time);
   }
 
-  getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar), time);
+  getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar, s.strong), time);
   s.step += 1;
 }
 
@@ -405,6 +408,7 @@ async function start() {
     s.state.timeSignature = c.timeSignature;
     const meter = meterOf(c.timeSignature);
     s.stepsPerBar = meter.stepsPerBar;
+    s.strong = strongSteps(meter.accentSteps);
     showSettings(s.state, c.preset);
     logConductor(c, overrides);
 

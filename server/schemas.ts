@@ -32,6 +32,25 @@ export function parseEcho(value: unknown): EchoClaim | null {
 }
 const echoes = z.unknown().optional().transform(parseEcho);
 const dur = z.enum(DURATIONS);
+
+/** Optional strength 0-1 per event. Lenient on purpose: out-of-range values are clamped and anything that is not a number is dropped (playback then uses 0.8), so dynamics never cost a retry. */
+export function parseVelocity(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : undefined;
+}
+const velocity = z.unknown().optional().transform(parseVelocity);
+
+type DrumVelocity = { kick?: number[]; snare?: number[]; hat?: number[] };
+function parseDrumVelocity(value: unknown): DrumVelocity | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const out: DrumVelocity = {};
+  for (const row of ['kick', 'snare', 'hat'] as const) {
+    const list = (value as Record<string, unknown>)[row];
+    if (Array.isArray(list)) out[row] = list.slice(0, 32).map((v) => parseVelocity(v) ?? 0.8);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+const drumVelocity = z.unknown().optional().transform(parseDrumVelocity);
 const pitch = z.string().regex(/^[A-G][#b]?[0-8]$/, 'pitch must look like "A2" or "C#3"');
 const octave = (p: string) => Number(p.slice(-1));
 const stepIn = (steps: number) => z.number().int().min(0).max(steps - 1);
@@ -49,15 +68,16 @@ export function describeIssues(error: z.ZodError): string {
 
 export const drumBarSchema = (steps: number) => {
   const row = z.array(bit).length(steps);
-  return z.object({ kick: row, snare: row, hat: row }).superRefine((bar, ctx) => {
-    const hits = [...bar.kick, ...bar.snare, ...bar.hat].reduce((sum, v) => sum + v, 0);
-    if (hits > MAX_EVENTS) {
-      ctx.addIssue({ code: 'custom', message: `too many hits in one bar (${hits}); use at most ${MAX_EVENTS} across kick, snare and hat combined` });
+  return z.object({ kick: row, snare: row, hat: row, velocity: drumVelocity }).superRefine((bar, ctx) => {
+    // The limit is per instrument: kick, snare and hat may each have up to MAX_EVENTS hits in a bar.
+    for (const name of ['kick', 'snare', 'hat'] as const) {
+      const hits = bar[name].reduce((sum, v) => sum + v, 0);
+      if (hits > MAX_EVENTS) ctx.addIssue({ code: 'custom', message: `too many ${name} hits in one bar (${hits}); use at most ${MAX_EVENTS} per instrument`, path: [name] });
     }
   });
 };
 
-const noteSchema = (steps: number) => z.object({ step: stepIn(steps), note: pitch, dur });
+const noteSchema = (steps: number) => z.object({ step: stepIn(steps), note: pitch, dur, velocity });
 
 export const bassBarSchema = (steps: number) =>
   z
@@ -71,7 +91,7 @@ export const bassBarSchema = (steps: number) =>
 
 const chordSchema = (steps: number) =>
   z
-    .object({ step: stepIn(steps), notes: z.array(pitch).min(2).max(5), dur })
+    .object({ step: stepIn(steps), notes: z.array(pitch).min(2).max(5), dur, velocity })
     .superRefine((chord, ctx) => {
       if (new Set(chord.notes).size !== chord.notes.length) {
         ctx.addIssue({ code: 'custom', message: 'chord notes must be distinct', path: ['notes'] });
@@ -121,7 +141,7 @@ export const conductorReplySchema = z.object({
 export const drumsReplySchema = (steps: number) => z.object({ why, echoes, bars: z.array(drumBarSchema(steps)).length(BARS) });
 
 /** Bass reply schema, aware of the drums it must lock to: a note has to land on each bar's first kick. */
-export function bassReplySchema(steps: number, drums: z.infer<ReturnType<typeof drumBarSchema>>[]) {
+export function bassReplySchema(steps: number, drums: { kick: number[] }[]) {
   return z.object({ why, echoes, bars: z.array(bassBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
     reply.bars.forEach((bar, b) => {
       const firstKick = drums[b]?.kick.indexOf(1) ?? -1;
@@ -136,7 +156,10 @@ export function bassReplySchema(steps: number, drums: z.infer<ReturnType<typeof 
   });
 }
 
-export const keysReplySchema = (steps: number) => z.object({ why, echoes, bars: z.array(keysBarSchema(steps)).length(BARS) });
+/** More than 4 bars from the keys player are cut down to the first 4 (before validating, so a bad extra bar cannot fail the reply). */
+const firstFourBars = (value: unknown) => (Array.isArray(value) && value.length > BARS ? value.slice(0, BARS) : value);
+
+export const keysReplySchema = (steps: number) => z.object({ why, echoes, bars: z.preprocess(firstFourBars, z.array(keysBarSchema(steps)).length(BARS)) });
 
 export const melodyReplySchema = (steps: number) =>
   z.object({ why, echoes, bars: z.array(melodyBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
@@ -160,8 +183,8 @@ export const conductorRequestSchema = z.object({
 
 // The shared state is validated loosely (it is our own earlier output); the new parts that arrive with a request are validated strictly against the meter.
 const looseRow = z.array(bit).min(1).max(32);
-const looseNote = z.object({ step: z.number().int().min(0).max(31), note: z.string().max(4), dur: z.string().max(4) });
-const looseChord = z.object({ step: z.number().int().min(0).max(31), notes: z.array(z.string().max(4)).max(6), dur: z.string().max(4) });
+const looseNote = z.object({ step: z.number().int().min(0).max(31), note: z.string().max(4), dur: z.string().max(4), velocity: z.number().min(0).max(1).optional() });
+const looseChord = z.object({ step: z.number().int().min(0).max(31), notes: z.array(z.string().max(4)).max(6), dur: z.string().max(4), velocity: z.number().min(0).max(1).optional() });
 
 export const jamStateSchema = z.object({
   tempo: z.number().min(40).max(220),
@@ -172,7 +195,12 @@ export const jamStateSchema = z.object({
     .array(
       z.object({
         key: z.string().max(40).optional(),
-        drums: z.object({ kick: looseRow, snare: looseRow, hat: looseRow }),
+        drums: z.object({
+          kick: looseRow,
+          snare: looseRow,
+          hat: looseRow,
+          velocity: z.object({ kick: z.array(z.number()).max(32).optional(), snare: z.array(z.number()).max(32).optional(), hat: z.array(z.number()).max(32).optional() }).optional(),
+        }),
         bass: z.array(looseNote).nullable(),
         keys: z.array(looseChord).nullable(),
         melody: z.array(looseNote).nullable(),

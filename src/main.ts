@@ -13,6 +13,7 @@ import type {
   JamState,
   MelodyBar,
   TokenUsage,
+  VoxBar,
 } from '../shared/types';
 import { defaultArrangement, describeArrangement, reharmonize, sanitizeArrangement, sectionStart, slotsOf, type Arrangement, type BlockSlot, type SectionName } from '../shared/arrangement';
 import { TIME_SIGNATURES, meterOf, type TimeSignature } from '../shared/meter';
@@ -37,7 +38,7 @@ type Who = 'conductor' | PartName | 'system' | 'steer';
 type Mode = 'idle' | 'loading' | 'playing';
 
 /** Who gets a token counter. */
-const TOKEN_AGENTS = ['conductor', 'drums', 'bass', 'keys', 'melody'] as const;
+const TOKEN_AGENTS = ['conductor', 'drums', 'bass', 'keys', 'melody', 'vox'] as const;
 
 /** The Studio switches, each with a one-line plain explanation. */
 const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
@@ -46,6 +47,7 @@ const STUDIO_TOOLS: { key: StudioKey; name: string; why: string }[] = [
   { key: 'ducking', name: 'Ducking', why: 'Keys dip when the kick hits, creating the pumping feel.' },
   { key: 'sends', name: 'Reverb & delay', why: 'Keys and melody share a room; melody gets an echo. Off: dry and close.' },
   { key: 'stereo', name: 'Panning', why: 'Keys a little left, melody a little right. Off: everything dead center (mono).' },
+  { key: 'vox', name: 'Vox chops', why: 'Robot vowels made from filtered synths. Off: no vox.' },
 ];
 
 /** Quick steers: the label is also the text sent to the conductor. */
@@ -187,7 +189,7 @@ app.innerHTML = `
           </div>
           <div id="legendPop" class="legend-pop" role="note" hidden>
             <ul>
-              <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: drums, bass, keys and melody, each in its own color</span></li>
+              <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: drums, bass, keys, melody and vox, each in its own color</span></li>
               <li><i class="k-motif"></i><span><b>Small colored dots</b> are motifs, the phrases an agent played</span></li>
               <li><i class="k-block"></i><span><b>Grey</b> dots are blocks, four bars each</span></li>
               <li><i class="k-echo"></i><span><b>White lines</b> are ECHOES: an agent called back another's idea</span></li>
@@ -250,6 +252,7 @@ const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphH
   bass: cssVar('--bass'),
   keys: cssVar('--keys'),
   melody: cssVar('--melody'),
+  vox: cssVar('--vox'),
 });
 
 // ---------- Token counters ----------
@@ -276,7 +279,7 @@ function resetTokens() {
   tokTotalEl.textContent = '0';
 }
 
-const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', system: 'System', steer: 'You' };
+const LABEL: Record<Who, string> = { conductor: 'Conductor', drums: 'Drums', bass: 'Bass', keys: 'Keys', melody: 'Melody', vox: 'Vox', system: 'System', steer: 'You' };
 
 function log(who: Who, text: string, tag?: string) {
   const li = document.createElement('li');
@@ -503,7 +506,7 @@ async function runStage<T>(s: Session, who: PartName, n: number, earlier: object
 
 // ---------- Band memory graph ----------
 
-const ECHO_NOUN: Record<string, string> = { drums: 'groove', bass: 'bassline', keys: 'chords', melody: 'hook' };
+const ECHO_NOUN: Record<string, string> = { drums: 'groove', bass: 'bassline', keys: 'chords', melody: 'hook', vox: 'chop' };
 
 /** Chat line for a new ECHOES edge, e.g. "bringing back the melody's hook from block 2". */
 function announceEcho(e: EchoEvent) {
@@ -589,7 +592,7 @@ function newSession(vibe: string): Session {
           write: (n) =>
             runStage<DrumBar>(s, 'drums', n, {}, (bars) => {
               s.blockStart.set(n, s.state.bars.length);
-              for (const drums of bars) s.state.bars.push({ key: s.state.key, timeSignature: s.state.timeSignature, drums, bass: null, keys: null, melody: null });
+              for (const drums of bars) s.state.bars.push({ key: s.state.key, timeSignature: s.state.timeSignature, drums, bass: null, keys: null, melody: null, vox: null });
             }),
         },
         {
@@ -611,6 +614,14 @@ function newSession(vibe: string): Session {
           write: (n, up) =>
             runStage<MelodyBar>(s, 'melody', n, { drums: up.drums, bass: up.bass, keys: up.keys }, (bars) => {
               bars.forEach((melody, i) => (barOf(s, n, i).melody = melody));
+            }),
+        },
+        {
+          // The vox listens to the whole band and chops the melody; it is silent in intros (the server answers without a model call).
+          name: 'vox',
+          write: (n, up) =>
+            runStage<VoxBar>(s, 'vox', n, { drums: up.drums, keys: up.keys, melody: up.melody }, (bars) => {
+              bars.forEach((vox, i) => (barOf(s, n, i).vox = vox));
             }),
         },
       ],
@@ -684,6 +695,7 @@ function tick(s: Session, time: number) {
   if (ev.bass.length) sounding.push('bass');
   if (ev.keys.length) sounding.push('keys');
   if (ev.melody.length) sounding.push('melody');
+  if (getRig().getStudio().vox && ev.vox.length) sounding.push('vox');
   if (sounding.length) {
     Tone.getDraw().schedule(() => {
       if (session === s) for (const a of sounding) graphPanel.flash(a);

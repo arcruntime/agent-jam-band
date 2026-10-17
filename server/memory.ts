@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { SECTION_NAMES } from '../shared/arrangement.js';
-import type { BassBar, ChordBar, DrumBar, GraphLink, GraphNode, GraphPayload, MelodyBar } from '../shared/types.js';
+import type { BassBar, ChordBar, DrumBar, GraphLink, GraphNode, GraphPayload, MelodyBar, VoxBar } from '../shared/types.js';
 import { query, toNum } from './graph.js';
 
 /**
@@ -8,8 +8,8 @@ import { query, toNum } from './graph.js';
  * Everything here is best effort: when Neo4j is unavailable, recall gives an empty list, writes are dropped and the graph is empty. Nothing throws.
  */
 
-export type MemoryAgent = 'drums' | 'bass' | 'keys' | 'melody';
-export const MEMORY_AGENTS: readonly MemoryAgent[] = ['drums', 'bass', 'keys', 'melody'];
+export type MemoryAgent = 'drums' | 'bass' | 'keys' | 'melody' | 'vox';
+export const MEMORY_AGENTS: readonly MemoryAgent[] = ['drums', 'bass', 'keys', 'melody', 'vox'];
 
 const idPart = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
 export const sessionIdSchema = idPart;
@@ -33,8 +33,8 @@ export interface BandMemoryItem {
   summary: string;
 }
 
-/** Each part answers the one it is built on: bass locks to the kick, keys sit on the bass, the melody sits on the chords. */
-const LOCKS: Partial<Record<MemoryAgent, MemoryAgent>> = { bass: 'drums', keys: 'bass', melody: 'keys' };
+/** Each part answers the one it is built on: bass locks to the kick, keys sit on the bass, the melody sits on the chords, and the vox chops the melody. */
+const LOCKS: Partial<Record<MemoryAgent, MemoryAgent>> = { bass: 'drums', keys: 'bass', melody: 'keys', vox: 'melody' };
 
 export const motifId = (sessionId: string, block: number, agent: string) => `${sessionId}:${block}:${agent}`;
 
@@ -72,9 +72,15 @@ export function describeMelody(bars: MelodyBar[]): string {
   return `bar ${i + 1}: ${bars[i].slice(0, 8).map((n) => `${n.note}@${n.step}`).join(' ')}`;
 }
 
+export function describeVox(bars: VoxBar[]): string {
+  const i = bars.findIndex((b) => b.length);
+  if (i < 0) return 'silent';
+  return `bar ${i + 1}: ${bars[i].slice(0, 8).map((n) => `${n.note}/${n.vowel}@${n.step}`).join(' ')}`;
+}
+
 export function summarize(agent: MemoryAgent, bars: unknown[], why: string, fallback: boolean): string {
   const b = bars as never[];
-  const detail = agent === 'drums' ? describeDrums(b) : agent === 'bass' ? describeBass(b) : agent === 'keys' ? describeKeys(b) : describeMelody(b);
+  const detail = agent === 'drums' ? describeDrums(b) : agent === 'bass' ? describeBass(b) : agent === 'keys' ? describeKeys(b) : agent === 'vox' ? describeVox(b) : describeMelody(b);
   const lead = fallback || !why ? '(repeated an earlier phrase)' : why;
   return `${lead} | ${detail}`.slice(0, MAX_SUMMARY);
 }

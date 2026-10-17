@@ -5,7 +5,7 @@
 import { sectionFromText, type SectionName } from '../shared/arrangement.js';
 import { TIME_SIGNATURES, type Meter, type TimeSignature } from '../shared/meter.js';
 import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
-import type { BassBar, ChordBar, ConductorOverrides, ConductorSettings, DrumBar, JamBar, JamState, MelodyBar } from '../shared/types.js';
+import type { BassBar, ChordBar, ConductorOverrides, ConductorSettings, DrumBar, JamBar, JamState, MelodyBar, VoxBar } from '../shared/types.js';
 
 // ---------- Pitch helpers ----------
 
@@ -57,6 +57,8 @@ const transposeKeys = (bar: ChordBar, shift: number): ChordBar =>
   bar.map((c) => ({ ...c, notes: transposeNames(c.notes, shift, 2, 5) }));
 const transposeMelody = (bar: MelodyBar, shift: number): MelodyBar =>
   bar.map((n) => ({ ...n, note: transposeNames([n.note], shift, 4, 6)[0] }));
+const transposeVox = (bar: VoxBar, shift: number): VoxBar =>
+  bar.map((n) => ({ ...n, note: transposeNames([n.note], shift, 3, 5)[0] }));
 
 // ---------- Previous block ----------
 
@@ -79,6 +81,30 @@ export const previousKeys = (state: JamState): ChordBar[] | null =>
   lastFour(state, (b) => b.keys)?.map((x) => transposeKeys(x.value, shiftFor(x.bar, state))) ?? null;
 export const previousMelody = (state: JamState): MelodyBar[] | null =>
   lastFour(state, (b) => b.melody)?.map((x) => transposeMelody(x.value, shiftFor(x.bar, state))) ?? null;
+
+export const previousVox = (state: JamState): VoxBar[] | null =>
+  lastFour(state, (b) => b.vox ?? null)?.map((x) => transposeVox(x.value, shiftFor(x.bar, state))) ?? null;
+
+/** Four empty bars: the vox sitting a block out. It is what the vox falls back to when it has nothing earlier to repeat. */
+export const silentVox = (): VoxBar[] => [[], [], [], []];
+
+/**
+ * The vox is a garnish, so whatever the model wrote is held to the song section's limits (this runs on every reply, fallback included): silent in the intro, a few quiet chops in the breakdown, up to 6 rising chops per bar in a build and up to 8 in a drop, and never louder than 0.7, which is below the melody's own default of 0.8.
+ * A hit with no velocity gets the cap. Too many hits are thinned evenly, not cut off at the end of the bar.
+ */
+export const VOX_LIMITS: Record<SectionName, { hits: number; velocity: number }> = {
+  intro: { hits: 0, velocity: 0 },
+  build: { hits: 6, velocity: 0.65 },
+  drop: { hits: 8, velocity: 0.7 },
+  breakdown: { hits: 1, velocity: 0.45 },
+};
+export function shapeVox(bars: VoxBar[], section?: SectionName): VoxBar[] {
+  const limit = section ? VOX_LIMITS[section] : { hits: 8, velocity: 0.7 };
+  return bars.map((bar) => {
+    const kept = bar.length <= limit.hits ? bar : limit.hits <= 0 ? [] : limit.hits === 1 ? [bar[0]] : Array.from({ length: limit.hits }, (_, i) => bar[Math.round((i * (bar.length - 1)) / (limit.hits - 1))]);
+    return kept.map((hit) => ({ ...hit, velocity: Math.min(hit.velocity ?? limit.velocity, limit.velocity) }));
+  });
+}
 
 /** Make sure every bar with a kick has a bass note on its first kick step, like the bass agent's own rule. */
 export function lockBassToKick(bars: BassBar[], drums: DrumBar[], key: string): BassBar[] {

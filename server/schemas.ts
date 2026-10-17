@@ -112,6 +112,28 @@ export const keysBarSchema = (steps: number) =>
       if (i >= 0) ctx.addIssue({ code: 'custom', message: ASCENDING, path: [i, 'step'] });
     });
 
+// ---------- Vox (robot vocal chops) ----------
+
+export const VOWELS = ['ah', 'oh', 'ee', 'oo'] as const;
+export const MAX_VOX_HITS = 8;
+const VOWEL_ALIASES: Record<string, (typeof VOWELS)[number]> = { ah: 'ah', a: 'ah', aa: 'ah', aah: 'ah', ahh: 'ah', oh: 'oh', o: 'oh', ohh: 'oh', ee: 'ee', e: 'ee', eee: 'ee', i: 'ee', oo: 'oo', ooh: 'oo', u: 'oo', uu: 'oo' };
+/** "Ah", "a", "OOH" ... -> the four vowel names. Anything else is left alone, so the schema rejects it and the retry shows the model what is allowed. */
+export const normalizeVowel = (v: unknown) => (typeof v === 'string' ? (VOWEL_ALIASES[v.toLowerCase().replace(/[^a-z]/g, '')] ?? v) : v);
+const vowel = z.preprocess(normalizeVowel, z.enum(VOWELS));
+
+export const voxBarSchema = (steps: number) =>
+  z
+    .array(
+      z
+        .object({ step: stepIn(steps), note: pitch, vowel, dur, velocity })
+        .refine((n) => octave(n.note) >= 3 && octave(n.note) <= 5, { message: 'vox notes must be in octaves 3 to 5', path: ['note'] }),
+    )
+    .max(MAX_VOX_HITS, `at most ${MAX_VOX_HITS} chops per bar`)
+    .superRefine((hits, ctx) => {
+      const i = firstOutOfOrder(hits);
+      if (i >= 0) ctx.addIssue({ code: 'custom', message: ASCENDING, path: [i, 'step'] });
+    });
+
 export const melodyBarSchema = (steps: number) =>
   z
     .array(noteSchema(steps).refine((n) => octave(n.note) >= 4 && octave(n.note) <= 6, { message: 'melody notes must be in octaves 4 to 6', path: ['note'] }))
@@ -165,6 +187,9 @@ const firstFourBars = (value: unknown) => (Array.isArray(value) && value.length 
 
 export const keysReplySchema = (steps: number) => z.object({ why, echoes, bars: z.preprocess(firstFourBars, z.array(keysBarSchema(steps)).length(BARS)) });
 
+/** The vox may be silent: bars can all be empty. */
+export const voxReplySchema = (steps: number) => z.object({ why, echoes, bars: z.array(voxBarSchema(steps)).length(BARS) });
+
 export const melodyReplySchema = (steps: number) =>
   z.object({ why, echoes, bars: z.array(melodyBarSchema(steps)).length(BARS) }).superRefine((reply, ctx) => {
     const total = reply.bars.reduce((sum, bar) => sum + bar.length, 0);
@@ -212,6 +237,8 @@ const looseRow = z.array(bit).min(1).max(32);
 const looseNote = z.object({ step: z.number().int().min(0).max(31), note: z.string().max(4), dur: z.string().max(4), velocity: z.number().min(0).max(1).optional() });
 const looseChord = z.object({ step: z.number().int().min(0).max(31), notes: z.array(z.string().max(4)).max(6), dur: z.string().max(4), velocity: z.number().min(0).max(1).optional() });
 
+const looseVox = z.object({ step: z.number().int().min(0).max(31), note: z.string().max(4), vowel: z.enum(VOWELS), dur: z.string().max(4), velocity: z.number().min(0).max(1).optional() });
+
 export const jamStateSchema = z.object({
   tempo: z.number().min(40).max(220),
   key: z.string().min(1).max(40),
@@ -232,6 +259,7 @@ export const jamStateSchema = z.object({
         bass: z.array(looseNote).nullable(),
         keys: z.array(looseChord).nullable(),
         melody: z.array(looseNote).nullable(),
+        vox: z.array(looseVox).nullable().optional(),
       }),
     )
     .max(64),

@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { BLOCK_BARS, defaultArrangement, parseChord, sanitizeArrangement, sectionFromText, sectionNameOf, type BlockPlan, type SectionName } from '../shared/arrangement.js';
 import { meterOf, type Meter } from '../shared/meter.js';
 import { SOUND_PRESETS, type SoundPreset } from '../shared/presets.js';
-import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar, TokenUsage } from '../shared/types.js';
+import type { AgentReply, BassBar, ChordBar, ConductorOverrides, ConductorReply, ConductorSettings, DrumBar, JamState, MelodyBar, TokenUsage, VoxBar } from '../shared/types.js';
 import { config } from './config.js';
 import {
   defaultBass,
@@ -21,6 +21,9 @@ import {
   previousDrums,
   previousKeys,
   previousMelody,
+  previousVox,
+  shapeVox,
+  silentVox,
 } from './fallback.js';
 import { getClient, reasoningParams } from './llm.js';
 import { recall, remember, type BandMemoryItem, type MemoryAgent, type MemoryCtx } from './memory.js';
@@ -33,6 +36,7 @@ import {
   type EchoClaim,
   keysReplySchema,
   melodyReplySchema,
+  voxReplySchema,
 } from './schemas.js';
 
 type Msg = OpenAI.Chat.ChatCompletionMessageParam;
@@ -49,7 +53,7 @@ export class AgentError extends Error {
 
 const CONTEXT_BARS = 8;
 const DUR_LIST = DURATIONS.map((d) => `"${d}"`).join(', ');
-const BAND = 'a four-piece AI jam band (drums, bass, keys and melody)';
+const BAND = 'a five-piece AI jam band (drums, bass, keys, melody and vox)';
 
 // ---------- System prompts (each paragraph is one unbroken line) ----------
 
@@ -71,7 +75,7 @@ const STEER_PARAGRAPH =
   'Live steering: if the song object has "listener_steer", the listener changed the direction while the band was playing. Follow its "direction" (the conductor\'s instruction to the band) and its "text" from this phrase on; they override the vibe wherever the two conflict. Bars you are shown from before the change may be left out because they used a different meter.';
 
 const SECTION_PARAGRAPH =
-  'Song structure: the request may include "section" (the part of the song this phrase belongs to: intro, build, drop or breakdown, with "what_to_play" for your instrument) and "chords_per_bar" (the chord planned for each of the 4 bars, with its tones). Play the section: intro and breakdown are sparse and spacious, a build rises in energy bar by bar, a drop is the full band at full energy. Follow the planned chords: the chord of each bar is the harmony for that whole bar. Playing sparse never breaks the rules below (there is still at least one kick or one note in each bar). If there is no "section", just carry on as before.';
+  'Song structure: the request may include "section" (the part of the song this phrase belongs to: intro, build, drop or breakdown, with "what_to_play" for your instrument) and "chords_per_bar" (the chord planned for each of the 4 bars, with its tones). Play the section: intro and breakdown are sparse and spacious, a build rises in energy bar by bar, a drop is the full band at full energy. Follow the planned chords: the chord of each bar is the harmony for that whole bar. Playing sparse never breaks the rules below (the drums, bass and keys still have at least one hit or note in every bar, and the melody at least 3 notes in all). If there is no "section", just carry on as before.';
 
 const JSON_ONLY = 'Reply with ONLY a JSON object, with no prose, no comments and no markdown fences, in exactly this shape:';
 
@@ -125,6 +129,21 @@ const melodySystem = (m: Meter) =>
     NOTE_VELOCITY,
     `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying how the melody fits the chords and why>", ${ECHO_SHAPE}, "bars": [[{"step": 0, "note": "E5", "dur": "4n"}, ...], [...], [...], [...]]}`,
     `Rules: "bars" has exactly 4 arrays, one per bar; a bar may be empty but there must be at least 3 notes across the 4 bars. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic). note is scientific pitch notation such as "E5" or "F#4", in octaves 4 to 6 (C4 to C6). dur is one of ${DUR_LIST}. Use at most 12 notes per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
+  ].join('\n\n');
+
+const voxSystem = (m: Meter) =>
+  [
+    `You are the VOX player in ${BAND}. You write robot vocal chops, as JSON, on a sixteenth-note step grid: short vowel-like hits that a synth voice sings through filters, like a robot choir (no words, only vowels).`,
+    gridParagraph(m),
+    `You are given the drummer's, the keys player's and the melody player's NEXT 4 BARS. Read them first. Chop the melody: answer or echo its notes with short vocal hits (the same pitches, or a chord tone from the keys part), mostly on off-beat steps and in the gaps where the melody rests, so you never crowd the lead. Every hit has a "vowel", exactly one of "ah" (open and wide), "oh" (round), "ee" (bright and tight) or "oo" (dark and soft): "ah" and "oh" suit longer or stronger hits, "ee" suits quick, high or accented ones and "oo" suits soft ones. Vary the vowels so the line seems to speak. Keep hits short ("16n" and "8n" mostly, "4n" at most for a held sigh).`,
+    `You are always quieter and sparser than the melody: never busier than it and never louder, so keep velocities modest (0.4 to 0.7). Silence is welcome: an empty array is a rest bar, and you may return four empty bars when the part is better without you.`,
+    MEMORY_PARAGRAPH,
+    `You are especially good at calling back a melody motif from band_memory as a chop: keep its pitches, change the rhythm and give each hit a vowel, then set "echoes" to its id.`,
+    STEER_PARAGRAPH,
+    SECTION_PARAGRAPH,
+    NOTE_VELOCITY,
+    `${JSON_ONLY} {"why": "<one short sentence, at most 20 words, saying what you chopped and why>", ${ECHO_SHAPE}, "bars": [[{"step": 2, "note": "E4", "vowel": "ah", "dur": "16n"}, ...], [...], [...], [...]]}`,
+    `Rules: "bars" has exactly 4 arrays, one per bar, and a bar may be empty. step is an integer from 0 to ${m.stepsPerBar - 1}, and steps within a bar are strictly ascending (monophonic, one chop per step). note is scientific pitch notation such as "E4" or "G#4", in octaves 3 to 5 (C3 to B5), in the key. vowel is exactly one of "ah", "oh", "ee" or "oo". dur is one of ${DUR_LIST}. Use at most 8 chops per bar. Keep it compact: no comments, no extra keys, and "why" is at most 20 words. Output nothing outside the JSON object.`,
   ].join('\n\n');
 
 /** The preset menu the conductor chooses from (it must pick the closest one; there is no other sound to choose). */
@@ -259,6 +278,9 @@ interface Fallback<B> {
 
 type Ctx = MemoryCtx | undefined;
 
+/** Bars that are all empty arrays (only a vox can write these; drum bars are objects). */
+const silent = (bars: unknown[]) => bars.every((b) => Array.isArray(b) && b.length === 0);
+
 /**
  * Runs an agent; if both attempts fail, returns a normal-looking reply that reuses the agent's previous block (or a built-in pattern) instead.
  * The failure goes to the server console only. The reply has no "why", so the UI shows nothing for it.
@@ -274,12 +296,13 @@ async function guarded<B>(
   try {
     const { data, latencyMs, tokens } = await run();
     const { echoes = null, ...reply } = data;
-    if (ctx) remember(ctx, name, { bars: reply.bars, why: reply.why, echoes, fallback: false });
+    // A silent block (a vox sitting out) has nothing to call back, so it adds nothing to the band's memory.
+    if (ctx && !silent(reply.bars)) remember(ctx, name, { bars: reply.bars, why: reply.why, echoes, fallback: false });
     return { ...reply, latencyMs, ...(tokens ? { tokens } : {}), ...(echoes ? { echoed: true } : {}) };
   } catch (err) {
     const { bars, source } = fallback();
     console.error(`[${name}] FALLBACK (${source}) because: ${(err as Error).message}`);
-    if (ctx) remember(ctx, name, { bars, why: '', echoes: null, fallback: true });
+    if (ctx && !silent(bars)) remember(ctx, name, { bars, why: '', echoes: null, fallback: true });
     const spent = err instanceof AgentError ? err.usage : undefined; // the failed attempts still cost tokens
     return { why: '', bars, latencyMs: Date.now() - started, fallback: true, ...(spent ? { tokens: spent } : {}) };
   }
@@ -308,6 +331,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'minimal: one long root note per bar (the root of that bar\'s chord), soft and unhurried',
     keys: 'soft sustained chords: the chord of each bar held long ("1m") at low velocity (about 0.4 to 0.6)',
     melody: 'mostly rests: three or four sparse, long notes across the 4 bars, chord tones, quiet',
+    vox: 'silent: all four bars empty',
   },
   build: {
     energy: 'rising: more energy every bar, heading for the drop',
@@ -315,6 +339,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'growing: root notes that get busier bar by bar, with octave jumps by bar 4, following the chord roots',
     keys: 'rising: begin with held chords, then repeated stabs or pulses in bars 3 and 4 with velocity climbing, following the chords',
     melody: 'a rising line: ascending notes that come more often each bar and finish high in bar 4, built from the chord tones',
+    vox: 'rising: a few quiet chops in bars 1 and 2 that come more often, then quick 16th-note chops climbing in pitch in bars 3 and 4, always fewer notes than the melody',
   },
   drop: {
     energy: 'full: the whole band at full energy, the payoff of the song',
@@ -322,6 +347,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'full: the driving bassline locked to the kick and syncopated, built on the root of each bar\'s chord, at strong velocity',
     keys: 'full: bright rhythmic chord stabs on kick and snare steps and on the group starts, strong velocity, the chord of each bar',
     melody: 'the hook: the most memorable, rhythmic motif of the song, 6 to 12 notes in the strongest bars, on chord tones',
+    vox: 'the vocal hook: rhythmic chops on the off-beats and in the gaps of the melody, echoing the melody\'s motif, with leaps between vowels, leaving plenty of space',
   },
   breakdown: {
     energy: 'low: stripped back, the song takes a breath',
@@ -329,6 +355,7 @@ const SECTION_GUIDE: Record<SectionName, { energy: string } & Record<MemoryAgent
     bass: 'sparse: one held root or sub note per bar with a long duration',
     keys: 'airy: one long soft chord per bar ("1m"), the chord of that bar, lowest velocity, wide open space',
     melody: 'sparse and emotional: a few long notes on chord tones with rests between them',
+    vox: 'very sparse: at most one soft held vowel per bar ( "oo" or "ah" ), or silence',
   },
 };
 
@@ -350,7 +377,7 @@ function planView(plan: BlockPlan | undefined, who: MemoryAgent) {
 const stepsOf = (row: number[]) => row.flatMap((v, i) => (v ? [i] : []));
 
 /** Finished bars of one part from the shared state, newest last. The drummer may be writing ahead, so later parts can still be null. */
-function history<K extends 'drums' | 'bass' | 'keys' | 'melody'>(state: JamState, part: K) {
+function history<K extends 'drums' | 'bass' | 'keys' | 'melody' | 'vox'>(state: JamState, part: K) {
   // Bars from another meter have a different step grid, so they are left out after a live meter change.
   const sameMeter = state.bars.filter((b) => !b.timeSignature || b.timeSignature === state.timeSignature);
   return sameMeter.flatMap((b) => (b[part] ? [b[part]] : [])).slice(-CONTEXT_BARS);
@@ -505,6 +532,35 @@ export async function melodyAgent(state: JamState, drums: DrumBar[], bass: BassB
     () => {
       const previous = previousMelody(state);
       return previous ? { bars: previous, source: 'previous block' } : { bars: defaultMelody(state.key), source: 'built-in pattern' };
+    },
+  );
+}
+
+export async function voxAgent(state: JamState, drums: DrumBar[], keys: ChordBar[], melody: MelodyBar[], ctx?: Ctx, plan?: BlockPlan): Promise<AgentReply<VoxBar>> {
+  // The intro is silent by design, so there is nothing to ask the model and nothing to remember.
+  if (plan?.section === 'intro') return { why: '', bars: silentVox(), latencyMs: 0 };
+  const m = meterOf(state.timeSignature);
+  const user = JSON.stringify({
+    song: song(state, m),
+    ...planView(plan, 'vox'),
+    drums_next_4_bars: drumsView(drums),
+    keys_next_4_bars: keys,
+    melody_next_4_bars: melody,
+    previous_vox_bars: history(state, 'vox'),
+    band_memory: await recallFor(ctx, 'vox'),
+    task: 'Write the next 4 bars of robot vocal chops over the melody, chords and drums above.',
+  });
+  return guarded<VoxBar>(
+    'vox',
+    ctx,
+    async () => {
+      const out = await runAgent('vox', voxSystem(m), user, voxReplySchema(m.stepsPerBar));
+      // Held to the section's limits whatever the model wrote (see shapeVox).
+      return { ...out, data: { ...out.data, bars: shapeVox(out.data.bars, plan?.section) } };
+    },
+    () => {
+      const previous = previousVox(state);
+      return { bars: shapeVox(previous ?? silentVox(), plan?.section), source: previous ? 'previous block' : 'silence' };
     },
   );
 }

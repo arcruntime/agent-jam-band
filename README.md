@@ -1,6 +1,6 @@
 # Agent Jam Band
 
-A conductor and four AI agents (drums, bass, keys, melody) improvise together while you listen. A Vite + vanilla TypeScript frontend plays the result with Tone.js, and a small Express backend keeps the API keys server-side.
+A conductor and five AI agents (drums, bass, keys, melody, vox) improvise together while you listen. A Vite + vanilla TypeScript frontend plays the result with Tone.js, and a small Express backend keeps the API keys server-side.
 
 ## Run it
 
@@ -33,7 +33,13 @@ The layout is built for a projector: dark theme, band chat on the left, the live
 
 ## Studio (production A/B)
 
-Five switches under the graph work live while the band plays, and none of them restarts or glitches the audio (changes are short ramps): Master bus (EQ, compressor, limiter), Humanize (swing, timing jitter, velocity), Ducking, Reverb & delay sends, and Panning (stereo vs mono). With Master bus off the limiter is out of the path, so peaks can be louder and harsher; that is the point of the comparison.
+Six switches under the graph work live while the band plays, and none of them restarts or glitches the audio (changes are short ramps): Master bus (EQ, compressor, limiter), Humanize (swing, timing jitter, velocity), Ducking, Reverb & delay sends, Panning (stereo vs mono) and Vox chops (robot vowels made from filtered synths; off: no vox). With Master bus off the limiter is out of the path, so peaks can be louder and harsher; that is the point of the comparison.
+
+## Vox (robot vocal chops)
+
+The fifth musician, vox, plays short vowel chops. There is no audio model, so the voice is built in Tone.js (`src/vox.ts`): an FM sawtooth source goes through an amplitude envelope and three parallel bandpass filters set to the formants of the vowel ("ah", "oh", "ee" or "oo"), then a bit crusher (a stepped WaveShaper, coarser on the electronic presets and gentler on jazz) and a lowpass. Each chop glides up about three semitones into its note in 40 ms, and the filters glide to the next vowel, so it sounds like a robot syllable and not like an organ. The voice is monophonic and every chop is at most 0.4 seconds long.
+
+Vox uses the same block format as the others: 4 bars of hits on the step grid, each with a `step`, a `note` (octaves 3 to 5), a `vowel`, a `dur` and an optional `velocity`. It hears the drums, keys and melody of the block and reads band memory, so it can echo a melody motif as a chop (an ECHOES edge in the graph, with `LOCKS_TO` the melody). It plays in builds and drops: the server limits builds to 6 hits per bar at velocity 0.65 and drops to 8 hits at 0.7, a breakdown to a single hit at 0.45, and in an intro it is silent (the server answers without calling the model, so it costs no tokens). Those limits are enforced on the server whatever the model returns. The vox bus also sits 3 dB below the melody's level, so it is never louder than the melody. It has its own color in the graph, its own token counter and a chat line when it has something to say (silent blocks stay out of the chat and out of memory). The Vox chops switch in the Studio panel turns it off without touching the rest of the band.
 
 ## Genres
 

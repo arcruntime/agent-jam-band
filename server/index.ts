@@ -2,12 +2,12 @@ import express from 'express';
 import { z } from 'zod';
 import { meterOf } from '../shared/meter.js';
 import type { ConductorSettings } from '../shared/types.js';
-import { AgentError, bassAgent, conductorAgent, conductorSteerAgent, drumsAgent, keysAgent, melodyAgent } from './agents.js';
+import { AgentError, bassAgent, conductorAgent, conductorSteerAgent, drumsAgent, keysAgent, melodyAgent, voxAgent } from './agents.js';
 import { config } from './config.js';
 import { closeNeo4j, initNeo4j, onNeo4jConnected } from './graph.js';
 import { getClient } from './llm.js';
 import { discardBlocks, ensureSchema, loadGraph, memoryCtxSchema, rememberSession, rememberSteer, sessionIdSchema } from './memory.js';
-import { BARS, bassBarSchema, blockPlanSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema } from './schemas.js';
+import { BARS, bassBarSchema, blockPlanSchema, conductorRequestSchema, describeIssues, drumBarSchema, jamStateSchema, keysBarSchema, melodyBarSchema } from './schemas.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -113,6 +113,13 @@ route('/api/agents/melody', async (b) => {
     memoryOf(b),
     planOf(b),
   );
+});
+
+// The vox chops the melody: it reads the drums, the keys and the melody of the same 4 bars.
+route('/api/agents/vox', async (b) => {
+  const state = jamStateSchema.parse(b.state);
+  const steps = stepsFor(state);
+  return voxAgent(state, four(drumBarSchema(steps)).parse(b.drums), four(keysBarSchema(steps)).parse(b.keys), four(melodyBarSchema(steps)).parse(b.melody), memoryOf(b), planOf(b));
 });
 
 // The band's memory graph for one session, for the force-graph panel. Always 200: if Neo4j is off the lists are empty and available is false.

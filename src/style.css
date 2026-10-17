@@ -10,6 +10,7 @@
   --bass: #b48cff;
   --keys: #5ad19a;
   --melody: #ff8fb0;
+  --vox: #5ee6ff;
   --conductor: #7c9cff;
   --steer: #ff5fa2;
   --bad: #ff6b81;
@@ -105,6 +106,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .tok[data-agent='bass'] b { color: var(--bass); }
 .tok[data-agent='keys'] b { color: var(--keys); }
 .tok[data-agent='melody'] b { color: var(--melody); }
+.tok[data-agent='vox'] b { color: var(--vox); }
 .tok.total { padding-right: 12px; margin-right: 4px; border-right: 1px solid var(--line); }
 .tok.total b { font-size: 24px; }
 
@@ -147,6 +149,7 @@ button.info:hover, button.info[aria-expanded='true'] { color: var(--text); borde
 .msg.bass { border-color: var(--bass); }
 .msg.keys { border-color: var(--keys); }
 .msg.melody { border-color: var(--melody); }
+.msg.vox { border-color: var(--vox); }
 .msg.conductor { border-color: var(--conductor); }
 .msg.steer { border-color: var(--steer); }
 .msg.system { color: var(--muted); }
@@ -156,6 +159,7 @@ button.info:hover, button.info[aria-expanded='true'] { color: var(--text); borde
 .msg.bass .who { color: var(--bass); }
 .msg.keys .who { color: var(--keys); }
 .msg.melody .who { color: var(--melody); }
+.msg.vox .who { color: var(--vox); }
 .msg.conductor .who { color: var(--conductor); }
 .msg.steer .who { color: var(--steer); }
 .msg .bars { color: var(--muted); white-space: nowrap; }

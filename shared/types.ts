@@ -41,6 +41,24 @@ export type ChordBar = ChordHit[];
 export type MelodyNote = BassNote;
 export type MelodyBar = MelodyNote[];
 
+/** The four robot vowels a vocal chop can sing. */
+export type Vowel = 'ah' | 'oh' | 'ee' | 'oo';
+
+/** One robot vocal chop: a short vowel on a note. */
+export interface VoxHit {
+  step: number;
+  /** Scientific pitch, e.g. "E4" */
+  note: string;
+  vowel: Vowel;
+  /** Tone.js duration, e.g. "16n" */
+  dur: string;
+  /** Optional strength 0-1; missing means 0.8 (the server caps it below the melody) */
+  velocity?: number;
+}
+
+/** A bar of chops. Empty is a rest, and a whole block of empty bars is a silent vox. */
+export type VoxBar = VoxHit[];
+
 /** One bar of the shared state. Parts are null until their agent has written them (agents run in order and overlap across blocks). */
 export interface JamBar {
   /** The key this bar was written in, so a reused bar can be transposed if the key changes */
@@ -51,6 +69,8 @@ export interface JamBar {
   bass: BassBar | null;
   keys: ChordBar | null;
   melody: MelodyBar | null;
+  /** Missing on bars written before the vox existed, and null until the vox agent has written it */
+  vox?: VoxBar | null;
 }
 
 /** Shared state every agent sees. `tempo` is quarter-note beats per minute. `bars` grows by 4 each time the band writes a phrase. */
@@ -90,6 +110,7 @@ export interface BlockParts {
   bass: BassBar[];
   keys: ChordBar[];
   melody: MelodyBar[];
+  vox: VoxBar[];
 }
 
 /** The four things the conductor decides, and what a live steer changes. */
@@ -129,7 +150,7 @@ export interface GraphNode {
   id: string;
   type: GraphNodeType;
   label: string;
-  /** drums | bass | keys | melody, for agent and motif nodes */
+  /** drums | bass | keys | melody | vox, for agent and motif nodes */
   agent?: string;
   /** Block number (1-based), for block and motif nodes */
   block?: number;

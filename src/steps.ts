@@ -22,6 +22,7 @@ export interface StepEvents {
   bass: Played<BlockParts['bass'][number][number]>[];
   keys: Played<BlockParts['keys'][number][number]>[];
   melody: Played<BlockParts['melody'][number][number]>[];
+  vox: Played<BlockParts['vox'][number][number]>[];
 }
 
 /**
@@ -63,5 +64,6 @@ export function stepEvents(parts: BlockParts, pos: number, stepsPerBar: number, 
     bass: played(parts.bass[bar]),
     keys: played(parts.keys[bar]),
     melody: played(parts.melody[bar]),
+    vox: played(parts.vox?.[bar] ?? []),
   };
 }

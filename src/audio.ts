@@ -5,7 +5,8 @@
  *   bass:   MonoSynth -> Distortion
  *   keys:   sampled electric or grand piano -> gentle 7 kHz lowpass -> duck gain, or the PolySynth of fat saws -> lowpass -> duck gain; then pan -0.2
  *   melody: Synth (square/saw) -> lowpass -> vibrato -> feedback delay -> pan +0.2
- *   keys and melody (only) also feed one shared reverb send
+ *   vox:    robot vocal chops (src/vox.ts: FM saw -> formant filters -> bit crusher) -> vox gate -> pan 0, always below the melody
+ *   keys, melody and vox (only) also feed one shared reverb send
  *   all:    -> master lowpass -> EQ3 -> compressor -> limiter -> speakers (drums and bass go in dry and centered)
  *
  * The conductor's `preset` decides the synth settings, effect amounts and swing (see PRESETS).
@@ -18,6 +19,7 @@ import { DrumMachine, ElectricPiano, SplendidGrandPiano, getDrumMachineNames } f
 import * as Tone from 'tone';
 import type { SoundPreset } from '../shared/presets';
 import type { StepEvents } from './steps';
+import { createVoxVoice, MAX_CHOP_S } from './vox';
 
 type Wave = 'sawtooth' | 'square' | 'triangle' | 'sine' | 'fatsawtooth';
 
@@ -186,6 +188,11 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
   },
 };
 
+/** The vox sits this far under the melody's own level (dB), on top of the server capping its velocity below the melody's. Chosen by measuring with the same hit on both: see the vox tests. */
+const VOX_BELOW_MELODY_DB = 3;
+/** Crusher depth per preset: gritty on the electronic ones, gentle on the warm ones. */
+const VOX_BITS: Record<SoundPreset, number> = { lofi: 6, futurebass: 5, house: 5, rock: 7, ambient: 7, dnb: 5, jazz: 8, hiphop: 6 };
+
 /** Live on/off switches for the Studio panel: each one bypasses a production tool so the listener can hear what it does. All on by default. */
 export interface StudioState {
   /** EQ, compressor and limiter on the master bus */
@@ -198,6 +205,8 @@ export interface StudioState {
   sends: boolean;
   /** Keys left and melody right (off: both centered) */
   stereo: boolean;
+  /** The robot vocal chops (off: no vox) */
+  vox: boolean;
 }
 export type StudioKey = keyof StudioState;
 /** A fixed velocity for every hit when Humanize is off: no accents, no ghost notes, no agent dynamics. */
@@ -221,6 +230,8 @@ export interface Rig {
   silence(): void;
   /** The gain node that ducks the keys on every kick (exposed for tests). */
   readonly duckGain: Tone.Gain;
+  /** The gate and level of the vox (exposed for tests): its gain is 0 when the Studio vox switch is off. */
+  readonly voxBus: Tone.Gain;
   readonly preset: SoundPreset | null;
 }
 
@@ -237,12 +248,13 @@ export function createRig(): Rig {
   const master = new Tone.Filter(20000, 'lowpass');
   master.connect(processed);
   master.connect(bypass);
-  const studio: StudioState = { master: true, humanize: true, ducking: true, sends: true, stereo: true };
+  const studio: StudioState = { master: true, humanize: true, ducking: true, sends: true, stereo: true, vox: true };
 
   // ---- one reverb shared by keys and melody (drums and bass never touch it) ----
   const reverb = new Tone.Reverb({ decay: 2.5, wet: 1 }).connect(master);
   const keysSend = new Tone.Gain(0.3).connect(reverb);
   const melodySend = new Tone.Gain(0.2).connect(reverb);
+  const voxSend = new Tone.Gain(0.2).connect(reverb);
 
   // ---- drums ----
   const kick = new Tone.MembraneSynth({
@@ -300,6 +312,16 @@ export function createRig(): Rig {
     oscillator: { type: 'square' },
     envelope: { attack: 0.02, decay: 0.2, sustain: 0.5, release: 0.4 },
   }).connect(melodyFilter);
+
+  // ---- vox: robot chops -> gate/level -> pan (centered) -> master, and the gate output also feeds the reverb send ----
+  const voxPan = new Tone.Panner(0).connect(master);
+  const voxBus = new Tone.Gain(Tone.dbToGain(PRESETS.lofi.melody.volume - VOX_BELOW_MELODY_DB));
+  voxBus.connect(voxPan);
+  voxBus.connect(voxSend);
+  const voxVoice = createVoxVoice({ bits: VOX_BITS.lofi });
+  voxVoice.output.connect(voxBus);
+  /** Where the vox bus sits for the current preset: under the melody, or shut when the Studio switch is off. */
+  const voxLevel = () => (studio.vox ? Tone.dbToGain(settings.melody.volume - VOX_BELOW_MELODY_DB) : 0);
 
   // ---- sampled instruments: they join the same chains as the synths they replace ----
   // Drums go dry and centered into the master bus. Keys go through a gentle lowpass into the same duck gain (so ducking, pan and the shared reverb send all still apply).
@@ -412,6 +434,7 @@ export function createRig(): Rig {
     bass: ev.bass.map((n) => ({ ...n, velocity: FLAT_VELOCITY })),
     keys: ev.keys.map((c) => ({ ...c, velocity: FLAT_VELOCITY })),
     melody: ev.melody.map((n) => ({ ...n, velocity: FLAT_VELOCITY })),
+    vox: (ev.vox ?? []).map((n) => ({ ...n, velocity: FLAT_VELOCITY })),
   });
 
   /** A bad note from an agent must never take the transport down, so every trigger is guarded. */
@@ -427,6 +450,9 @@ export function createRig(): Rig {
     get duckGain() {
       return duck;
     },
+    get voxBus() {
+      return voxBus;
+    },
     get preset() {
       return current;
     },
@@ -441,10 +467,13 @@ export function createRig(): Rig {
       } else if (key === 'sends') {
         keysSend.gain.rampTo(on ? settings.keys.reverbWet : 0, ramp);
         melodySend.gain.rampTo(on ? settings.melody.reverbSend : 0, ramp);
+        voxSend.gain.rampTo(on ? settings.melody.reverbSend : 0, ramp);
         delay.wet.rampTo(on ? settings.melody.delayWet : 0, ramp);
       } else if (key === 'stereo') {
         keysPan.pan.rampTo(on ? -0.2 : 0, ramp);
         melodyPan.pan.rampTo(on ? 0.2 : 0, ramp);
+      } else if (key === 'vox') {
+        voxBus.gain.rampTo(voxLevel(), ramp); // a chop that is ringing fades out over 40 ms instead of cutting off
       } else if (key === 'humanize') {
         Tone.getTransport().swing = on ? settings.swing : 0;
       } else if (key === 'ducking' && !on) {
@@ -497,6 +526,9 @@ export function createRig(): Rig {
       // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
       keysSend.gain.value = studio.sends ? p.keys.reverbWet : 0;
       melodySend.gain.value = studio.sends ? p.melody.reverbSend : 0;
+      voxSend.gain.value = studio.sends ? p.melody.reverbSend : 0;
+      voxBus.gain.value = voxLevel();
+      voxVoice.setBits(VOX_BITS[preset]);
       const transport = Tone.getTransport();
       transport.swing = studio.humanize ? p.swing : 0;
       transport.swingSubdivision = p.swingSub ?? '16n';
@@ -554,6 +586,8 @@ export function createRig(): Rig {
         } else safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jit(), c.velocity));
       }
       for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jit(), n.velocity));
+      // Vox off: nothing is triggered at all (the gate is shut as well, so a chop already ringing fades out).
+      if (studio.vox) for (const n of ev.vox ?? []) safely('vox', () => voxVoice.sing(n.note, n.vowel, Math.min(MAX_CHOP_S, Tone.Time(n.dur).toSeconds()), time + jit(), n.velocity));
     },
 
     silence() {
@@ -563,6 +597,7 @@ export function createRig(): Rig {
         slots.piano.value?.stop();
         bass.triggerRelease();
         melody.triggerRelease();
+        voxVoice.silence();
         duck.gain.cancelScheduledValues(0);
         duck.gain.value = 1;
       });

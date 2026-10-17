@@ -115,66 +115,78 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <main class="stage">
     <header class="top">
-      <div class="toprow">
+      <div class="brand">
         <h1>Agent Jam Band</h1>
-        <div class="field vibe">
-          <label for="vibe">Vibe</label>
-          <input id="vibe" type="text" maxlength="300" placeholder="${DEFAULT_VIBE}" autocomplete="off" />
-        </div>
-        <div class="field small">
-          <label for="bpm">BPM</label>
-          <input id="bpm" type="number" inputmode="numeric" min="${BPM_MIN}" max="${BPM_MAX}" step="1" placeholder="Auto" title="Blank = the conductor picks" />
-        </div>
-        <div class="field small">
-          <label for="meter">Time</label>
-          <select id="meter" title="Auto = the conductor picks">
-            <option value="">Auto</option>
-            ${TIME_SIGNATURES.map((t) => `<option value="${t}">${t}</option>`).join('')}
-          </select>
-        </div>
-        <div class="actions">
-          <button id="start">Start</button>
-          <button id="stop" class="ghost" disabled>Stop</button>
-          <button id="rec" class="ghost rec" disabled aria-pressed="false" title="Record the band's output; click again to save a file">● Rec</button>
-          <span id="recTimer" class="rec-timer" hidden></span>
-        </div>
+        <div class="brand-dots" aria-hidden="true"><i class="d-drums"></i><i class="d-bass"></i><i class="d-keys"></i><i class="d-melody"></i><i class="d-vox"></i></div>
       </div>
-      <div class="statusrow">
-        <dl class="meta">
-          <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
-          <div><dt>Key</dt><dd id="metaKey">–</dd></div>
-          <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
-          <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
-        </dl>
-        <div class="beat" id="beat" role="img" aria-label="Beat counter">
-          <div class="beat-num" id="beatNum">–</div>
-          <div class="beat-pips" id="beatPips"></div>
+      <div class="field vibe">
+        <label for="vibe">Vibe</label>
+        <input id="vibe" type="text" maxlength="300" placeholder="${DEFAULT_VIBE}" autocomplete="off" />
+      </div>
+      <details class="drawer overrides">
+        <summary><span class="sum-label">Tempo · Time</span><span class="sum-value"></span></summary>
+        <div class="pop pop-overrides">
+          <div class="field small">
+            <label for="bpm">BPM</label>
+            <input id="bpm" type="number" inputmode="numeric" min="${BPM_MIN}" max="${BPM_MAX}" step="1" placeholder="Auto" title="Blank = the conductor picks" />
+          </div>
+          <div class="field small">
+            <label for="meter">Time</label>
+            <select id="meter" title="Auto = the conductor picks">
+              <option value="">Auto</option>
+              ${TIME_SIGNATURES.map((t) => `<option value="${t}">${t}</option>`).join('')}
+            </select>
+          </div>
+          <p class="pop-note">Blank = the conductor picks. Set before Start.</p>
         </div>
-        <div class="section" id="section" aria-live="polite">
-          <span class="sec-label">Section</span>
-          <b class="sec-name" id="secName">–</b>
-          <span class="sec-bar" id="secBar"></span>
-        </div>
-        <div class="tokens" id="tokens" title="Tokens used this session, from the model's usage reports">
-          <div class="tok total"><span>Tokens</span><b id="tokTotal">0</b></div>
-          ${TOKEN_AGENTS.map((a) => `<div class="tok" data-agent="${a}"><span>${a}</span><b>0</b></div>`).join('')}
-        </div>
-        <div class="nowbox">
-          <p id="now" class="now">Warming up the band…</p>
-          <p id="next" class="next"></p>
-        </div>
+      </details>
+      <div class="actions">
+        <button id="start">Start</button>
+        <button id="stop" class="ghost" disabled>Stop</button>
+        <button id="rec" class="ghost rec" disabled aria-pressed="false" title="Record the band's output; click again to save a file">● Rec</button>
+        <span id="recTimer" class="rec-timer" hidden></span>
       </div>
     </header>
+    <section class="nowstrip" aria-label="Now playing">
+      <dl class="meta">
+        <div><dt>Tempo</dt><dd id="metaBpm">–</dd></div>
+        <div><dt>Key</dt><dd id="metaKey">–</dd></div>
+        <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
+        <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
+      </dl>
+      <div class="beat" id="beat" role="img" aria-label="Beat counter">
+        <div class="beat-num" id="beatNum">–</div>
+        <div class="beat-pips" id="beatPips"></div>
+      </div>
+      <div class="section" id="section" aria-live="polite">
+        <span class="sec-label">Section</span>
+        <b class="sec-name" id="secName">–</b>
+        <span class="sec-bar" id="secBar"></span>
+      </div>
+      <div class="nowbox">
+        <p id="now" class="now">Warming up the band…</p>
+        <div class="chips">
+          <details class="drawer chip tokens" id="tokens" title="Tokens used this session, from the model's usage reports">
+            <summary><b id="tokTotal">0</b><span>tokens</span></summary>
+            <div class="pop pop-tokens">
+              ${TOKEN_AGENTS.map((a) => `<div class="tok" data-agent="${a}"><span>${a}</span><b>0</b></div>`).join('')}
+            </div>
+          </details>
+          <details class="drawer chip buffer">
+            <summary><i class="buf-dot" aria-hidden="true"></i><span>buffer</span></summary>
+            <div class="pop pop-buffer"><p id="next" class="next"></p></div>
+          </details>
+        </div>
+      </div>
+    </section>
     <div class="split">
-      <div class="left">
-        <section class="panel chat">
-          <h2>Band chat</h2>
-          <ol id="log" aria-live="polite"></ol>
-        </section>
-        <section class="panel steer-panel" id="steerPanel" hidden>
-          <h2>Steer the band</h2>
+      <section class="panel chat">
+        <h2>Band chat</h2>
+        <ol id="log" aria-live="polite"></ol>
+        <section class="steer-panel" id="steerPanel" hidden>
+          <h2 class="sr-only">Steer the band</h2>
           <form id="steerForm" class="steer-row" autocomplete="off">
-            <input id="steerText" type="text" maxlength="200" placeholder="Try: switch to 7/8, go darker, make it jazzier…" aria-label="Steer the band" />
+            <label class="steer-box"><i class="k-steer" aria-hidden="true"></i><input id="steerText" type="text" maxlength="200" placeholder="Steer: switch to 7/8, go darker, make it jazzier…" aria-label="Steer the band" /></label>
             <button id="steerBtn" type="submit">Steer</button>
           </form>
           <div class="steer-quick" id="steerQuick">
@@ -182,42 +194,49 @@ app.innerHTML = `
           </div>
           <p id="steerNote" class="steer-note"></p>
         </section>
-      </div>
-      <div class="right">
-        <aside class="panel graph">
-          <div class="panel-head">
-            <h2>Band memory</h2>
-            <button type="button" id="legendBtn" class="info" aria-label="What am I looking at?" aria-expanded="false" aria-controls="legendPop">ⓘ</button>
-          </div>
-          <div id="legendPop" class="legend-pop" role="note" hidden>
-            <ul>
-              <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: drums, bass, keys, melody and vox, each in its own color</span></li>
-              <li><i class="k-motif"></i><span><b>Small colored dots</b> are motifs, the phrases an agent played</span></li>
-              <li><i class="k-block"></i><span><b>Grey</b> dots are blocks, four bars each</span></li>
-              <li><i class="k-echo"></i><span><b>White lines</b> are ECHOES: an agent called back another's idea</span></li>
-              <li><i class="k-locks"></i><span><b>Dashed</b> lines are LOCKS_TO: playing in sync</span></li>
-              <li><i class="k-steer"></i><span><b>Diamond</b> is a steer you gave the band</span></li>
-              <li><i class="k-section"></i><span><b>Rounded square</b> is a song section: intro, build, drop or breakdown</span></li>
-            </ul>
-            <p>The band's memory grows as they listen and call back each other's ideas.</p>
-          </div>
-          <div id="graphHost" class="graph-host"></div>
-        </aside>
-        <section class="panel studio" id="studio">
-          <h2>Studio: switch it off to hear what it does</h2>
-          <ul class="studio-list">
-            ${STUDIO_TOOLS.map(
-              (t) => `<li class="studio-item">
-              <button type="button" class="sw" role="switch" aria-checked="true" data-studio="${t.key}" aria-label="${t.name}">ON</button>
-              <span class="studio-name">${t.name}</span>
-              <p class="studio-why">${t.why}</p>
-            </li>`,
-            ).join('')}
+      </section>
+      <aside class="panel graph">
+        <div class="panel-head">
+          <h2>Band memory <span class="h2-sub">· Neo4j</span></h2>
+          <button type="button" id="legendBtn" class="info" aria-label="What am I looking at?" aria-expanded="false" aria-controls="legendPop">i</button>
+        </div>
+        <div id="legendPop" class="legend-pop" role="note" hidden>
+          <ul>
+            <li><i class="k-agent"></i><span><b>Big dots</b> are the agents: <b class="c-drums">drums</b>, <b class="c-bass">bass</b>, <b class="c-keys">keys</b>, <b class="c-melody">melody</b> and <b class="c-vox">vox</b></span></li>
+            <li><i class="k-motif"></i><span><b>Small colored dots</b> are motifs, the phrases an agent played</span></li>
+            <li><i class="k-block"></i><span><b>Grey</b> dots are blocks, four bars each</span></li>
+            <li><i class="k-echo"></i><span><b>White lines</b> are ECHOES: an agent called back another's idea</span></li>
+            <li><i class="k-locks"></i><span><b>Dashed</b> lines are LOCKS_TO: playing in sync</span></li>
+            <li><i class="k-steer"></i><span><b>Diamond</b> is a steer you gave the band</span></li>
+            <li><i class="k-section"></i><span><b>Rounded square</b> is a song section: intro, build, drop or breakdown</span></li>
           </ul>
-        </section>
-      </div>
+          <p>The band's memory grows as they listen and call back each other's ideas.</p>
+        </div>
+        <div id="graphHost" class="graph-host"></div>
+        <div class="dock">
+          <details class="drawer studio" id="studio">
+            <summary><b>Studio A/B</b><span class="dock-hint">Switch production tools off to hear what they do</span><span class="studio-state"></span></summary>
+            <div class="pop pop-studio">
+              <ul class="studio-list">
+                ${STUDIO_TOOLS.map(
+                  (t) => `<li class="studio-item">
+                  <button type="button" class="sw" role="switch" aria-checked="true" data-studio="${t.key}" aria-label="${t.name}">ON</button>
+                  <span class="studio-name">${t.name}</span>
+                  <p class="studio-why">${t.why}</p>
+                </li>`,
+                ).join('')}
+              </ul>
+            </div>
+          </details>
+          <details class="drawer credits-drawer">
+            <summary>Credits</summary>
+            <div class="pop pop-credits">
+              <p class="credits">Sampled sounds via smplr · Wurlitzer EP200 by Greg Sullivan (CC BY 3.0) · drum machines from smpldsnds/drum-machines · grand piano from sfzinstruments/SplendidGrandPiano · see README for licenses</p>
+            </div>
+          </details>
+        </div>
+      </aside>
     </div>
-    <footer class="credits">Sampled sounds via smplr · Wurlitzer EP200 by Greg Sullivan (CC BY 3.0) · drum machines from smpldsnds/drum-machines · grand piano from sfzinstruments/SplendidGrandPiano · see README for licenses</footer>
   </main>
 `;
 
@@ -983,6 +1002,21 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') setLegend(false);
+});
+
+// ---------- Drawers (<details class="drawer">): one open at a time; a click outside or Escape closes them ----------
+
+const drawers = [...document.querySelectorAll<HTMLDetailsElement>('details.drawer')];
+for (const d of drawers) {
+  d.addEventListener('toggle', () => {
+    if (d.open) for (const o of drawers) if (o !== d) o.open = false;
+  });
+}
+document.addEventListener('click', (e) => {
+  for (const d of drawers) if (d.open && !d.contains(e.target as Node)) d.open = false;
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') for (const d of drawers) d.open = false;
 });
 
 // ---------- Studio switches ----------

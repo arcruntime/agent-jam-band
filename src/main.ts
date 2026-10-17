@@ -65,6 +65,9 @@ interface Session {
   blockStart: Map<number, number>;
   /** Step count at which the current meter began; bar positions are measured from here */
   base: number;
+  /** Beats in a bar (the time signature's top number) and sixteenth steps per beat, for the beat counter */
+  beats: number;
+  stepsPerBeat: number;
   steering: boolean;
   waitFirst?: { resolve: () => void; reject: (err: Error) => void };
 }
@@ -108,7 +111,11 @@ app.innerHTML = `
             <div><dt>Meter</dt><dd id="metaMeter">–</dd></div>
             <div><dt>Sound</dt><dd id="metaSound">–</dd></div>
           </dl>
-          <p id="now" class="now">Press Start to hear the band.</p>
+          <div class="beat" id="beat" role="img" aria-label="Beat counter">
+            <div class="beat-num" id="beatNum">–</div>
+            <div class="beat-pips" id="beatPips"></div>
+          </div>
+          <p id="now" class="now">Warming up the band…</p>
           <p id="next" class="next"></p>
         </section>
         <section class="panel steer-panel" id="steerPanel" hidden>
@@ -140,6 +147,7 @@ app.innerHTML = `
         <div id="graphHost" class="graph-host"></div>
       </aside>
     </div>
+    <footer class="credits">Sampled sounds via smplr · Wurlitzer EP200 by Greg Sullivan (CC BY 3.0) · drum machines from smpldsnds/drum-machines · grand piano from sfzinstruments/SplendidGrandPiano · see README for licenses</footer>
   </main>
 `;
 
@@ -161,6 +169,9 @@ const steerText = document.querySelector<HTMLInputElement>('#steerText')!;
 const steerBtn = document.querySelector<HTMLButtonElement>('#steerBtn')!;
 const steerQuick = document.querySelector<HTMLElement>('#steerQuick')!;
 const steerNote = document.querySelector<HTMLElement>('#steerNote')!;
+const beatEl = document.querySelector<HTMLElement>('#beat')!;
+const beatNumEl = document.querySelector<HTMLElement>('#beatNum')!;
+const beatPipsEl = document.querySelector<HTMLElement>('#beatPips')!;
 
 const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const graphPanel = createGraphPanel(document.querySelector<HTMLElement>('#graphHost')!, {
@@ -194,8 +205,11 @@ function log(who: Who, text: string, tag?: string) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+/** False until every sampled instrument has loaded (or failed over to its synth). Start stays disabled until then. */
+let warm = false;
+
 function setMode(mode: Mode) {
-  startBtn.disabled = mode !== 'idle';
+  startBtn.disabled = mode !== 'idle' || !warm;
   vibeEl.disabled = mode !== 'idle';
   bpmEl.disabled = mode !== 'idle';
   meterEl.disabled = mode !== 'idle';
@@ -207,12 +221,42 @@ function setMode(mode: Mode) {
   }
   setSteerBusy(false);
   if (mode === 'idle') {
-    nowEl.textContent = 'Press Start to hear the band.';
+    nowEl.textContent = warm ? 'Press Start to hear the band.' : 'Warming up the band…';
     nextEl.textContent = '';
+    clearBeat();
   } else if (mode === 'loading') {
     nowEl.textContent = 'Starting…';
     nextEl.textContent = '';
   }
+}
+
+// ---------- Beat counter ----------
+
+let pipTotal = 0;
+
+/** Shows beat `beat` (1-based) of a bar with `total` beats: a big number plus one pip per beat, with beat 1 in its own colour. A meter change rebuilds the pips. */
+function renderBeat(beat: number, total: number) {
+  if (total !== pipTotal) {
+    pipTotal = total;
+    beatPipsEl.replaceChildren(
+      ...Array.from({ length: total }, (_, i) => {
+        const pip = document.createElement('i');
+        pip.className = i === 0 ? 'pip one' : 'pip';
+        return pip;
+      }),
+    );
+  }
+  [...beatPipsEl.children].forEach((pip, i) => pip.classList.toggle('on', i === beat - 1));
+  beatNumEl.textContent = String(beat);
+  beatEl.classList.toggle('downbeat', beat === 1);
+  beatEl.setAttribute('aria-label', `Beat ${beat} of ${total}`);
+}
+
+function clearBeat() {
+  pipTotal = 0;
+  beatPipsEl.replaceChildren();
+  beatNumEl.textContent = '–';
+  beatEl.classList.remove('downbeat');
 }
 
 function setSteerBusy(busy: boolean) {
@@ -362,6 +406,8 @@ function newSession(vibe: string): Session {
     epoch: 0,
     blockStart: new Map(),
     base: 0,
+    beats: 4,
+    stepsPerBeat: 4,
     steering: false,
     pipeline: new Pipeline<BlockParts>({
       bufferBlocks: BUFFER_BLOCKS,
@@ -446,6 +492,16 @@ function tick(s: Session, time: number) {
     Tone.getDraw().schedule(() => renderStatus(s), time);
   }
 
+  // Beat counter: on every beat of the bar (a quarter note in x/4, an eighth in x/8), timed to the audio like everything else.
+  const inBar = pos % s.stepsPerBar;
+  if (inBar % s.stepsPerBeat === 0) {
+    const beat = inBar / s.stepsPerBeat + 1;
+    const total = s.beats;
+    Tone.getDraw().schedule(() => {
+      if (session === s) renderBeat(beat, total);
+    }, time);
+  }
+
   getRig().play(stepEvents(s.current.parts, pos, s.stepsPerBar, s.strong), time);
   s.step += 1;
 }
@@ -461,6 +517,8 @@ function applyPending(s: Session, time: number) {
   void getRig().applyPreset(p.preset, p.bpm);
   s.stepsPerBar = meter.stepsPerBar;
   s.strong = strongSteps(meter.accentSteps);
+  s.beats = meter.numerator;
+  s.stepsPerBeat = 16 / meter.denominator;
   s.base = s.step;
   s.active = p;
   Tone.getDraw().schedule(() => {
@@ -538,7 +596,7 @@ function logConductor(c: ConductorReply, o: ConductorOverrides) {
 }
 
 async function start() {
-  if (session) return;
+  if (session || !warm) return;
   const overrides = readOverrides();
   const vibe = vibeEl.value.trim() || DEFAULT_VIBE;
   const s = newSession(vibe);
@@ -562,6 +620,8 @@ async function start() {
     const meter = meterOf(c.timeSignature);
     s.stepsPerBar = meter.stepsPerBar;
     s.strong = strongSteps(meter.accentSteps);
+    s.beats = meter.numerator;
+    s.stepsPerBeat = 16 / meter.denominator;
     s.active = s.target = { bpm: c.bpm, key: c.key, timeSignature: c.timeSignature, preset: c.preset };
     showSettings(s.active);
     logConductor(c, overrides);
@@ -621,6 +681,15 @@ steerQuick.addEventListener('click', (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-steer]');
   if (btn) void steer(btn.dataset.steer ?? '');
 });
+// Build the audio graph now and load every sampled instrument, so Start is instant. Until then the button stays disabled.
+startBtn.disabled = true;
+void getRig()
+  .load()
+  .then(() => {
+    warm = true;
+    if (!session) setMode('idle');
+  });
+
 startBtn.addEventListener('click', () => void start());
 stopBtn.addEventListener('click', stop);
 for (const el of [vibeEl, bpmEl]) {

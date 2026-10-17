@@ -118,6 +118,16 @@ input[aria-invalid='true'] { border-color: var(--bad); }
 .msg.keys .who { color: var(--keys); }
 .msg.melody .who { color: var(--melody); }
 
+/* ---- beat counter ---- */
+.beat { display: flex; align-items: center; gap: 20px; margin: 0 0 14px; padding: 10px 16px; border-radius: 10px; background: var(--bg); }
+.beat-num { min-width: 1.1em; font-size: 72px; line-height: 1; font-weight: 800; font-variant-numeric: tabular-nums; text-align: center; color: var(--muted); }
+.beat.downbeat .beat-num { color: var(--accent); }
+.beat-pips { display: flex; flex-wrap: wrap; gap: 8px; }
+.pip { width: 18px; height: 18px; border-radius: 50%; background: var(--line); transition: background 60ms, transform 60ms; }
+.pip.one { border-radius: 4px; outline: 2px solid var(--accent); outline-offset: 2px; }
+.pip.on { background: var(--text); transform: scale(1.25); }
+.pip.one.on { background: var(--accent); }
+
 /* ---- live steering ---- */
 .steer-row { display: flex; gap: 8px; margin: 0 0 8px; }
 .steer-row input { flex: 1; min-width: 0; }
@@ -144,3 +154,5 @@ input[aria-invalid='true'] { border-color: var(--bad); }
 .graph-empty { position: absolute; inset: 0; margin: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--muted); font-size: 13px; pointer-events: none; }
 .graph-empty[hidden] { display: none; }
 .msg.drums .bars, .msg.bass .bars, .msg.keys .bars, .msg.melody .bars { white-space: nowrap; }
+
+.credits { margin: 20px 0 0; color: var(--muted); font-size: 12px; text-align: center; }

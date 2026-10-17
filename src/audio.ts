@@ -1,9 +1,9 @@
 /**
- * The band's sound, built only from Tone.js synths and effects (no samples).
+ * The band's sound: Tone.js synths and effects, plus real sampled instruments from `smplr` where a preset calls for them (see SAMPLE_PLAN).
  *
- *   drums:  kick (MembraneSynth) | snare (NoiseSynth + short triangle tone) | hats (MetalSynth)
+ *   drums:  sampled drum machine (808 or the rock machine) when loaded, otherwise kick (MembraneSynth) | snare (NoiseSynth + short triangle tone) | hats (MetalSynth)
  *   bass:   MonoSynth -> Distortion
- *   keys:   PolySynth of fat saws -> lowpass -> "sidechain" duck gain -> pan -0.2
+ *   keys:   sampled electric or grand piano -> gentle 7 kHz lowpass -> duck gain, or the PolySynth of fat saws -> lowpass -> duck gain; then pan -0.2
  *   melody: Synth (square/saw) -> lowpass -> vibrato -> feedback delay -> pan +0.2
  *   keys and melody (only) also feed one shared reverb send
  *   all:    -> master lowpass -> EQ3 -> compressor -> limiter -> speakers (drums and bass go in dry and centered)
@@ -11,7 +11,10 @@
  * The conductor's `preset` decides the synth settings, effect amounts and swing (see PRESETS).
  * Every event plays at the strength the agent gave it, with a random +-8 ms of timing on everything except the kick.
  * The levels below are starting points chosen without listening tests; nudge `volume` values to taste.
+ *
+ * Samples load once, on page load (`rig.load()`). If one fails or times out the preset keeps playing on its synth, and the reason goes to the console only.
  */
+import { DrumMachine, ElectricPiano, SplendidGrandPiano, getDrumMachineNames } from 'smplr';
 import * as Tone from 'tone';
 import type { SoundPreset } from '../shared/presets';
 import type { StepEvents } from './steps';
@@ -21,6 +24,57 @@ type Wave = 'sawtooth' | 'square';
 /** Random timing slack, in seconds, on everything except the kick. */
 const JITTER_S = 0.008;
 const jitter = () => (Math.random() * 2 - 1) * JITTER_S;
+
+// ---------- Sampled instruments (smplr) ----------
+
+/** What a sampled instrument needs from smplr, whatever its version's exact typings say. */
+interface Sampler {
+  ready: Promise<void>;
+  start(event: { note: string | number; velocity?: number; time?: number; duration?: number }): unknown;
+  stop(): void;
+  getGroupNames?(): string[];
+}
+
+type DrumKit = '808' | 'rock';
+type KeysKit = 'ep' | 'piano';
+
+/** Which sampled kit each preset uses (null = keep the synth). Futurebass keys stay on the supersaw. Bass and melody stay synths. */
+const SAMPLE_PLAN: Record<SoundPreset, { drums: DrumKit | null; keys: KeysKit | null }> = {
+  lofi: { drums: '808', keys: 'ep' },
+  futurebass: { drums: '808', keys: null },
+  house: { drums: '808', keys: null },
+  rock: { drums: 'rock', keys: null },
+  ambient: { drums: null, keys: 'piano' },
+};
+
+/** Give up waiting for a kit after this long: the preset stays on its synth (a kit that arrives later is still picked up). */
+const LOAD_TIMEOUT_MS = 30000;
+/** Where gentle lowpass sits on sampled keys. */
+const KEYS_SAMPLE_LOWPASS_HZ = 7000;
+/** Sampled drum bus level, and per-drum velocity trims. Estimates chosen without listening: nudge to taste. */
+const DRUM_BUS_DB = -3;
+const DRUM_TRIM = { kick: 1, snare: 0.9, hat: 0.55 };
+
+interface DrumSlot {
+  inst: Sampler;
+  kick: string;
+  snare: string;
+  hat: string;
+}
+type SlotState = 'loading' | 'ready' | 'failed';
+
+/** smplr instruments are factories (older versions: classes). Try a plain call first, because calling a class without `new` throws before it does anything. */
+function make<T>(factory: unknown, ctx: unknown, options: object): T {
+  const f = factory as ((c: unknown, o: object) => T) & { new (c: unknown, o: object): T };
+  try {
+    return f(ctx, options);
+  } catch (err) {
+    if (err instanceof TypeError) return new f(ctx, options);
+    throw err;
+  }
+}
+
+const vel127 = (v: number) => Math.max(1, Math.min(127, Math.round(v * 127)));
 
 interface PresetSettings {
   /** Master lowpass in Hz: lower = duller, warmer */
@@ -96,6 +150,10 @@ export const PRESETS: Record<SoundPreset, PresetSettings> = {
 export interface Rig {
   /** Configure every synth and effect for a preset. The delay time follows the tempo: pass the bpm when the transport is about to change (live steering), otherwise the transport's current bpm is used. Everything is applied at once; only the reverb tail regenerates afterwards. */
   applyPreset(preset: SoundPreset, bpm?: number): Promise<void>;
+  /** Loads every sampled instrument (once). Resolves when all have loaded, failed or timed out; it never rejects, and failures only reach the console. */
+  load(): Promise<void>;
+  /** How each sampled instrument is doing (exposed for tests and debugging). */
+  sampleStates(): Record<'drums808' | 'drumsRock' | 'ep' | 'piano', SlotState>;
   /** Trigger everything that sounds on one step, at audio time `time`. */
   play(ev: StepEvents, time: number): void;
   /** Cut off anything still ringing (Stop). */
@@ -175,6 +233,95 @@ export function createRig(): Rig {
     envelope: { attack: 0.02, decay: 0.2, sustain: 0.5, release: 0.4 },
   }).connect(melodyFilter);
 
+  // ---- sampled instruments: they join the same chains as the synths they replace ----
+  // Drums go dry and centered into the master bus. Keys go through a gentle lowpass into the same duck gain (so ducking, pan and the shared reverb send all still apply).
+  const sampleCtx = Tone.getContext().rawContext as unknown as BaseAudioContext;
+  const asNode = (n: { input: unknown }) => n.input as AudioNode;
+  const drumSampleBus = new Tone.Gain(Tone.dbToGain(DRUM_BUS_DB)).connect(master);
+  const keysSampleLowpass = new Tone.Filter(KEYS_SAMPLE_LOWPASS_HZ, 'lowpass').connect(duck);
+  const keysSampleGain = new Tone.Gain(Tone.dbToGain(PRESETS.lofi.keys.volume)).connect(keysSampleLowpass);
+
+  const slots = {
+    drums808: { state: 'loading' as SlotState, value: null as DrumSlot | null },
+    drumsRock: { state: 'loading' as SlotState, value: null as DrumSlot | null },
+    ep: { state: 'loading' as SlotState, value: null as Sampler | null },
+    piano: { state: 'loading' as SlotState, value: null as Sampler | null },
+  };
+
+  /**
+   * Runs one loader. On failure, or if it takes longer than LOAD_TIMEOUT_MS, the slot is marked failed (the synth plays instead) and the reason is logged once, to the console only.
+   * A kit that finishes after the timeout is still adopted, from the next note on.
+   */
+  async function loadSlot(name: string, slot: { state: SlotState }, job: () => Promise<void>) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const run = job().then(() => {
+      clearTimeout(timer);
+      if (slot.state === 'failed') console.info(`[audio] sample "${name}" finished loading late, so it is used from now on`);
+      slot.state = 'ready';
+    });
+    const late = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        if (slot.state === 'loading') {
+          slot.state = 'failed';
+          console.warn(`[audio] sample "${name}" is still loading after ${LOAD_TIMEOUT_MS / 1000} s, so the synth plays for now`);
+        }
+        resolve();
+      }, LOAD_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([run, late]);
+    } catch (err) {
+      clearTimeout(timer);
+      slot.state = 'failed';
+      console.warn(`[audio] sample "${name}" is not available, so the synth plays instead: ${(err as Error).message ?? err}`);
+    }
+  }
+
+  async function loadDrums(name: string, slot: typeof slots.drums808, pick: (names: string[]) => string | undefined) {
+    await loadSlot(name, slot, async () => {
+      const instrument = pick(getDrumMachineNames());
+      if (!instrument) throw new Error('no matching drum machine in this version of smplr');
+      const inst = make<Sampler>(DrumMachine, sampleCtx, { instrument, destination: asNode(drumSampleBus) });
+      await inst.ready;
+      const groups = inst.getGroupNames?.() ?? [];
+      const kick = groups.find((g) => /^kick/i.test(g));
+      const snare = groups.find((g) => /^snare/i.test(g));
+      const hat = groups.find((g) => /^hi-?hat.*clos/i.test(g)) ?? groups.find((g) => /^hi-?hat/i.test(g));
+      if (!kick || !snare || !hat) throw new Error(`${instrument} has no kick, snare and closed hat (groups: ${groups.join(', ')})`);
+      slot.value = { inst, kick, snare, hat };
+    });
+  }
+
+  let loading: Promise<void> | null = null;
+  const loadAll = () =>
+    (loading ??= Promise.all([
+      loadDrums('TR-808 drums', slots.drums808, (names) => names.find((n) => n === 'TR-808')),
+      // smplr's DrumMachine has no TR-909. Use one if a newer version adds it, otherwise its Roland CR-8000.
+      loadDrums('rock drums', slots.drumsRock, (names) => names.find((n) => /909/.test(n)) ?? names.find((n) => /CR-8000/i.test(n))),
+      loadSlot('electric piano', slots.ep, async () => {
+        const inst = make<Sampler>(ElectricPiano, sampleCtx, { instrument: 'WurlitzerEP200', destination: asNode(keysSampleGain) });
+        await inst.ready;
+        slots.ep.value = inst;
+      }),
+      loadSlot('grand piano', slots.piano, async () => {
+        const inst = make<Sampler>(SplendidGrandPiano, sampleCtx, { destination: asNode(keysSampleGain), decayTime: 1.2 });
+        await inst.ready;
+        slots.piano.value = inst;
+      }),
+    ]).then(() => undefined));
+
+  /** The sampled drums for the current preset, or null (synth drums) if the preset has none or its kit is not ready. */
+  const drumKit = (): DrumSlot | null => {
+    const kit = current && SAMPLE_PLAN[current].drums;
+    const slot = kit === '808' ? slots.drums808 : kit === 'rock' ? slots.drumsRock : null;
+    return slot && slot.state === 'ready' ? slot.value : null;
+  };
+  const keysKit = (): Sampler | null => {
+    const kit = current && SAMPLE_PLAN[current].keys;
+    const slot = kit === 'ep' ? slots.ep : kit === 'piano' ? slots.piano : null;
+    return slot && slot.state === 'ready' ? slot.value : null;
+  };
+
   let current: SoundPreset | null = null;
   let settings: PresetSettings = PRESETS.lofi;
 
@@ -203,6 +350,9 @@ export function createRig(): Rig {
     get preset() {
       return current;
     },
+
+    load: loadAll,
+    sampleStates: () => ({ drums808: slots.drums808.state, drumsRock: slots.drumsRock.state, ep: slots.ep.state, piano: slots.piano.state }),
 
     async applyPreset(preset, bpm) {
       const p = PRESETS[preset];
@@ -236,6 +386,7 @@ export function createRig(): Rig {
         envelope: { attack: p.keys.attack, release: p.keys.release },
       });
       keys.volume.value = p.keys.volume;
+      keysSampleGain.gain.value = Tone.dbToGain(p.keys.volume); // sampled keys sit at the same level as the synth they replace: no louder
       keysFilter.frequency.value = p.keys.lowpass;
       // The shared reverb: keys send level and decay come from the preset (2.5 s is the starting decay), the melody gets its own send level.
       keysSend.gain.value = p.keys.reverbWet;
@@ -265,26 +416,44 @@ export function createRig(): Rig {
 
     play(ev, time) {
       // The kick stays exactly on the grid (and the duck with it); everything else floats by up to +-8 ms.
+      const dm = drumKit();
       if (ev.kick) {
-        safely('kick', () => kick.triggerAttackRelease('C1', '8n', time, ev.kick));
+        if (dm) safely('kick sample', () => dm.inst.start({ note: dm.kick, velocity: vel127(ev.kick * DRUM_TRIM.kick), time }));
+        else safely('kick', () => kick.triggerAttackRelease('C1', '8n', time, ev.kick));
         safely('duck', () => duckKeys(time));
       }
       if (ev.snare) {
-        safely('snare', () => {
-          const t = time + jitter();
-          snareNoise.triggerAttackRelease('16n', t, ev.snare);
-          snareTone.triggerAttackRelease(settings.snare.toneHz, '32n', t, ev.snare);
-        });
+        if (dm) safely('snare sample', () => dm.inst.start({ note: dm.snare, velocity: vel127(ev.snare * DRUM_TRIM.snare), time: time + jitter() }));
+        else
+          safely('snare', () => {
+            const t = time + jitter();
+            snareNoise.triggerAttackRelease('16n', t, ev.snare);
+            snareTone.triggerAttackRelease(settings.snare.toneHz, '32n', t, ev.snare);
+          });
       }
-      if (ev.hat) safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time + jitter(), ev.hat));
+      if (ev.hat) {
+        if (dm) safely('hat sample', () => dm.inst.start({ note: dm.hat, velocity: vel127(ev.hat * DRUM_TRIM.hat), time: time + jitter() }));
+        else safely('hat', () => hat.triggerAttackRelease(settings.hat.hz, '32n', time + jitter(), ev.hat));
+      }
       for (const n of ev.bass) safely('bass', () => bass.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
-      for (const c of ev.keys) safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jitter(), c.velocity));
+      const piano = keysKit();
+      for (const c of ev.keys) {
+        if (piano) {
+          safely('keys sample', () => {
+            const t = time + jitter();
+            const duration = Tone.Time(c.dur).toSeconds();
+            for (const note of c.notes) piano.start({ note, velocity: vel127(c.velocity), time: t, duration });
+          });
+        } else safely('keys', () => keys.triggerAttackRelease(c.notes, c.dur, time + jitter(), c.velocity));
+      }
       for (const n of ev.melody) safely('melody', () => melody.triggerAttackRelease(n.note, n.dur, time + jitter(), n.velocity));
     },
 
     silence() {
       safely('silence', () => {
         keys.releaseAll();
+        slots.ep.value?.stop();
+        slots.piano.value?.stop();
         bass.triggerRelease();
         melody.triggerRelease();
         duck.gain.cancelScheduledValues(0);
